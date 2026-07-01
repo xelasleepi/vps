@@ -76,9 +76,17 @@ startup, so a Windows update can't quietly undo them.
 
 **Installs software** (detect → skip if present → silent install → verify):
 WinRAR · Visual C++ Redistributables 2005–2022 (x86 + x64) · .NET Framework 4.8 ·
-.NET Desktop Runtime 8 · Edge WebView2 · DirectX June 2010 runtime · **Mem Reduct**
-(configured to autostart minimized to tray with auto-clean) · **Roblox** ·
-**Roblox Account Manager**.
+.NET Desktop Runtime 8 · Edge WebView2 · DirectX June 2010 runtime · **Loafy** ·
+**Roblox** · **Roblox Account Manager**.
+
+**Loafy** (the Roblox instance optimizer) is downloaded as a 2.1 MB Native-AOT
+`Loafy.exe` (no .NET runtime needed) to `C:\ProgramData\Loafy` and registered as
+a highest-privilege **logon task** that runs hidden in the background — it
+continuously classifies each `RobloxPlayerBeta.exe` and applies per-instance CPU
+affinity, EcoQoS, working-set caps, memory trimming and GPU priority. It replaces
+Mem Reduct here (smarter + Roblox-aware); set `InstallMemReduct = $true` in
+`$Config` if you want the generic RAM cleaner too. Loafy is built fresh from
+`C:\Users\loaf\loafy` (Native AOT) for each release.
 
 **Every action is logged** to `C:\ProgramData\RobloxDeploy\logs\`:
 `install.log`, `errors.log`, `downloads.log`, `optimization.log`, `software.log`.

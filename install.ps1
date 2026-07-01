@@ -64,7 +64,8 @@ $Config = [ordered]@{
         InstallDotNet              = $true
         InstallWebView2            = $true
         InstallDirectX             = $true
-        InstallMemReduct           = $true
+        InstallLoafy               = $true   # Roblox instance optimizer (supersedes Mem Reduct)
+        InstallMemReduct           = $false  # replaced by Loafy; flip to $true to run both
         InstallRoblox              = $true
         InstallRobloxAccountManager= $true
     }
@@ -689,6 +690,9 @@ function Invoke-Software {
         }
     } else { Write-Skip 'DirectX Runtime (June 2010)' '(disabled in config)' }
 
+    # Loafy — Roblox instance optimizer (Native-AOT background console).
+    if ($f.InstallLoafy) { Install-Loafy } else { Write-Skip 'Loafy (Roblox optimizer)' '(disabled in config)' }
+
     # Mem Reduct + configuration. Kill any running instance first (else the Inno
     # installer blocks on a hidden "close the app" prompt), tell it to close apps,
     # and cap the run time. Asset name is versioned, so resolve latest from GitHub.
@@ -749,6 +753,41 @@ function Find-RobloxPlayer {
     $ver = "$env:LOCALAPPDATA\Roblox\Versions"
     if (-not (Test-Path $ver)) { return $null }
     Get-ChildItem $ver -Recurse -Filter 'RobloxPlayerBeta.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
+}
+
+function Install-Loafy {
+    # Downloads the Native-AOT Loafy.exe (Roblox instance optimizer) to a
+    # no-space path, registers a highest-privilege logon task so it runs hidden
+    # in the background at every startup (it needs admin for standby-list flush),
+    # and launches it now. No .NET runtime required.
+    $sw  = [Diagnostics.Stopwatch]::StartNew()
+    $dir = Join-Path $env:ProgramData 'Loafy'          # C:\ProgramData\Loafy — no spaces (schtasks-friendly)
+    $exe = Join-Path $dir 'Loafy.exe'
+    # SHA-256 of the current release build (informational; left unpinned so a
+    # freshly-rebuilt release doesn't break the download):
+    #   64bd3defce9d4cf7ea8280adaa1a94ac3c9d10a430cc0e0987f6b260542dbac7
+    $url = 'https://github.com/xelasleepi/vps/releases/download/loafy/Loafy.exe'
+
+    if ((Test-Path $exe) -and (Test-Done 'sw.Loafy')) {
+        Write-Skip 'Loafy (Roblox optimizer)' '(done in a previous run)'; Record 'Loafy' 'Skipped' 0 'present'; return
+    }
+
+    $null = New-Item -ItemType Directory -Force -Path $dir
+    taskkill /F /IM Loafy.exe 2>$null | Out-Null       # stop a running copy so we can overwrite
+    if (-not (Get-File -Url $url -Dest $exe -Label 'Loafy (Roblox optimizer)')) {
+        Write-Fail 'Loafy (Roblox optimizer)' 'download failed'; Set-Step 'sw.Loafy' 'Failed' 'download'; Record 'Loafy' 'Failed' $sw.Elapsed.TotalSeconds; return
+    }
+
+    # Auto-start hidden at logon (a Task Scheduler console app has no visible window).
+    schtasks /Create /TN 'Loafy' /TR $exe /SC ONLOGON /RL HIGHEST /F 2>$null | Out-Null
+    Start-Process $exe -WindowStyle Hidden -ErrorAction SilentlyContinue
+
+    if (Test-Path $exe) {
+        Write-Ok 'Loafy (Roblox optimizer)' ("(auto-starts at logon, {0:N1}s)" -f $sw.Elapsed.TotalSeconds)
+        Set-Step 'sw.Loafy' 'Done' 'installed'; Record 'Loafy' 'Installed' $sw.Elapsed.TotalSeconds
+    } else {
+        Write-Fail 'Loafy (Roblox optimizer)' 'exe missing after download'; Set-Step 'sw.Loafy' 'Failed' 'verify'; Record 'Loafy' 'Failed' $sw.Elapsed.TotalSeconds
+    }
 }
 
 function Install-Roblox {
