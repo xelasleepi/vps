@@ -320,7 +320,7 @@ function Install-Item {
         [string]$Name, [string]$Url, [string]$Arguments,
         [scriptblock]$Detect, [scriptblock]$Verify,
         [string]$Sha256, [string]$Ext = '.exe', [bool]$Enabled = $true, [string]$Key,
-        [string]$Repo, [string]$AssetMatch
+        [string]$Repo, [string]$AssetMatch, [int]$TimeoutSec = 300
     )
     if (-not $Enabled) { Write-Skip $Name '(disabled in config)'; Record $Name 'Skipped' 0 'disabled'; return }
     if (-not $Key) { $Key = 'sw.' + ($Name -replace '[^\w]', '') }
@@ -350,9 +350,19 @@ function Install-Item {
         Write-Fail $Name 'download failed after 3 attempts'; Set-Step $Key 'Failed' 'download'; Record $Name 'Failed' $sw.Elapsed.TotalSeconds 'download'; return
     }
     try {
-        if ($Arguments) { $p = Start-Process -FilePath $file -ArgumentList $Arguments -PassThru -Wait -WindowStyle Hidden }
-        else            { $p = Start-Process -FilePath $file -PassThru -Wait -WindowStyle Hidden }
-        $code = $p.ExitCode
+        $p = if ($Arguments) { Start-Process -FilePath $file -ArgumentList $Arguments -PassThru -WindowStyle Hidden }
+             else            { Start-Process -FilePath $file -PassThru -WindowStyle Hidden }
+        # Bounded wait so a silent installer that hangs (e.g. a hidden "close the
+        # running app" prompt) can never freeze the whole deployment.
+        if ($p.WaitForExit($TimeoutSec * 1000)) {
+            $code = $p.ExitCode
+        } else {
+            taskkill /F /T /PID $p.Id 2>$null | Out-Null
+            try { if (-not $p.HasExited) { $p.Kill() } } catch { }
+            $code = -1
+            Write-Host ("`r   ⚠ {0} installer exceeded {1}s — killed, verifying…      " -f $Name, $TimeoutSec) -ForegroundColor DarkYellow
+            Write-LogFile "[WARN] $Name installer timed out after $TimeoutSec s; killed then verified." 'Software'
+        }
     } catch { Write-Fail $Name $_.Exception.Message; Set-Step $Key 'Failed' 'run'; Record $Name 'Failed' $sw.Elapsed.TotalSeconds 'run'; return }
 
     Start-Sleep -Milliseconds 400
@@ -679,12 +689,15 @@ function Invoke-Software {
         }
     } else { Write-Skip 'DirectX Runtime (June 2010)' '(disabled in config)' }
 
-    # Mem Reduct + configuration. Asset name is versioned, so resolve the latest
-    # from GitHub (pinned fallback keeps it working if the API is unreachable).
+    # Mem Reduct + configuration. Kill any running instance first (else the Inno
+    # installer blocks on a hidden "close the app" prompt), tell it to close apps,
+    # and cap the run time. Asset name is versioned, so resolve latest from GitHub.
+    if ($f.InstallMemReduct) { taskkill /F /IM memreduct.exe 2>$null | Out-Null }
     Install-Item -Name 'Mem Reduct' -Enabled $f.InstallMemReduct `
         -Repo 'henrypp/memreduct' -AssetMatch '*setup.exe' `
         -Url 'https://github.com/henrypp/memreduct/releases/download/v.3.5.2/memreduct-3.5.2-setup.exe' `
-        -Arguments '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /NOICONS' `
+        -Arguments '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /NOICONS /CLOSEAPPLICATIONS' `
+        -TimeoutSec 180 `
         -Detect { (Test-Path "$env:ProgramFiles\Mem Reduct\memreduct.exe") -or (Test-UninstallName 'Mem Reduct') } `
         -Verify { Test-Path "$env:ProgramFiles\Mem Reduct\memreduct.exe" }
     if ($f.InstallMemReduct) { Set-MemReductConfig }
