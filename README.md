@@ -70,6 +70,11 @@ WinRAR · Visual C++ Redistributables 2005–2022 (x86 + x64) · .NET Framework 
 - **Resilient** — every step reports `SUCCESS` / `SKIPPED` / `FAILED` with elapsed
   time; a failure never aborts the run, it's collected and shown in the summary.
 - **Idempotent** — re-running skips anything already installed/applied.
+- **Smart resume** — every finished step is checkpointed to
+  `C:\ProgramData\RobloxDeploy\state.json`. If you close it midway or the box
+  reboots, just run the one-liner again: it shows what's already done
+  (`↷ … (done in a previous run)`), retries only what failed, and continues.
+  Start completely fresh with `$env:DEPLOY_RESET='1'; irm … | iex`.
 
 ## Configuration
 

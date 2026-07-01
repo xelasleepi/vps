@@ -104,6 +104,65 @@ function Write-LogFile {
 }
 
 # ============================================================================
+#  3b. Resume state — checkpoint file that makes re-runs smart
+# ============================================================================
+# Every completed step is recorded to state.json immediately. If the run is
+# closed midway (or the box reboots), re-running detects what already finished,
+# shows it as "done in a previous run", and continues with what's left. Set the
+# environment variable DEPLOY_RESET=1 before running to start completely fresh.
+$StateFile        = Join-Path $Root 'state.json'
+$script:State     = @{}
+$script:PriorDone = 0
+
+if ($env:DEPLOY_RESET -eq '1' -and (Test-Path $StateFile)) {
+    Remove-Item $StateFile -Force -ErrorAction SilentlyContinue
+}
+
+function Get-State {
+    if (Test-Path $StateFile) {
+        try {
+            $obj = Get-Content $StateFile -Raw -ErrorAction Stop | ConvertFrom-Json
+            foreach ($p in $obj.PSObject.Properties) {
+                $script:State[$p.Name] = @{ Status = $p.Value.Status; Time = $p.Value.Time; Detail = $p.Value.Detail }
+            }
+        } catch { $script:State = @{} }
+    }
+    $script:PriorDone = @($script:State.Values | Where-Object { $_.Status -eq 'Done' }).Count
+}
+function Save-State { try { ($script:State | ConvertTo-Json -Depth 4) | Set-Content -Path $StateFile -Encoding UTF8 -ErrorAction SilentlyContinue } catch { } }
+function Test-Done([string]$Key) { $script:State.ContainsKey($Key) -and $script:State[$Key].Status -eq 'Done' }
+function Set-Step([string]$Key, [string]$Status, [string]$Detail = '') {
+    $script:State[$Key] = @{ Status = $Status; Time = (Get-Date -Format 's'); Detail = $Detail }
+    Save-State
+}
+
+# Runs a state-gated optimization step. The $Body returns a short detail string;
+# on rerun a completed step is skipped without redoing the work.
+function Do-Opt {
+    param([string]$Key, [string]$Name, [scriptblock]$Body)
+    $sk = "opt.$Key"
+    if (Test-Done $sk) { Write-Skip $Name '(done in a previous run)'; Record $Name 'Skipped' 0 'state'; return }
+    try {
+        $detail = & $Body
+        Write-Ok $Name $detail
+        Set-Step $sk 'Done' "$detail"
+        Record $Name 'Optimized' 0 "$detail"
+    } catch {
+        Write-Fail $Name $_.Exception.Message
+        Set-Step $sk 'Failed' $_.Exception.Message
+        Record $Name 'Failed' 0 $_.Exception.Message
+    }
+}
+
+function Show-Resume {
+    if ($script:PriorDone -gt 0) {
+        Write-Host "   ⟳ Resuming — $($script:PriorDone) step(s) already completed earlier; continuing where it left off." -ForegroundColor DarkCyan
+        Write-Host "     (run with `$env:DEPLOY_RESET='1' to start fresh)" -ForegroundColor DarkGray
+        Write-Host ''
+    }
+}
+
+# ============================================================================
 #  4. Terminal UI helpers
 # ============================================================================
 $script:Results = New-Object System.Collections.ArrayList
@@ -227,12 +286,14 @@ function Test-UninstallName([string]$Pattern) {
 }
 
 function Set-Reg {
+    # Writes a registry value (creating the key path). Emits nothing to the
+    # pipeline so it is safe to call inside Do-Opt bodies whose return value is
+    # captured as the step's detail string.
     param([string]$Path, [string]$Name, $Value, [string]$Type = 'DWord')
     try {
         if (-not (Test-Path $Path)) { New-Item -Path $Path -Force | Out-Null }
         New-ItemProperty -Path $Path -Name $Name -Value $Value -PropertyType $Type -Force | Out-Null
-        return $true
-    } catch { Write-LogFile "[WARN] reg $Path\$Name : $($_.Exception.Message)" 'Optimization'; return $false }
+    } catch { Write-LogFile "[WARN] reg $Path\$Name : $($_.Exception.Message)" 'Optimization' }
 }
 
 # ============================================================================
@@ -242,28 +303,37 @@ function Install-Item {
     param(
         [string]$Name, [string]$Url, [string]$Arguments,
         [scriptblock]$Detect, [scriptblock]$Verify,
-        [string]$Sha256, [string]$Ext = '.exe', [bool]$Enabled = $true
+        [string]$Sha256, [string]$Ext = '.exe', [bool]$Enabled = $true, [string]$Key
     )
     if (-not $Enabled) { Write-Skip $Name '(disabled in config)'; Record $Name 'Skipped' 0 'disabled'; return }
+    if (-not $Key) { $Key = 'sw.' + ($Name -replace '[^\w]', '') }
     $sw = [Diagnostics.Stopwatch]::StartNew()
     Write-LogFile "[INFO] Installing $Name" 'Software'
 
-    if ($Detect -and (& $Detect)) { Write-Skip $Name '(already installed)'; Record $Name 'Skipped' $sw.Elapsed.TotalSeconds 'present'; return }
+    # Live detection is authoritative — skip if present (from this or a prior run).
+    if ($Detect -and (& $Detect)) {
+        $why = if (Test-Done $Key) { '(done in a previous run)' } else { '(already installed)' }
+        Write-Skip $Name $why; Set-Step $Key 'Done' 'detected'; Record $Name 'Skipped' $sw.Elapsed.TotalSeconds 'present'; return
+    }
+    # No detector available, but the checkpoint says it finished — trust it.
+    if (-not $Detect -and (Test-Done $Key)) {
+        Write-Skip $Name '(done in a previous run)'; Record $Name 'Skipped' 0 'state'; return
+    }
 
     $file = Join-Path $Dl (($Name -replace '[^\w]', '_') + $Ext)
     if (-not (Get-File -Url $Url -Dest $file -Label $Name -Sha256 $Sha256)) {
-        Write-Fail $Name 'download failed after 3 attempts'; Record $Name 'Failed' $sw.Elapsed.TotalSeconds 'download'; return
+        Write-Fail $Name 'download failed after 3 attempts'; Set-Step $Key 'Failed' 'download'; Record $Name 'Failed' $sw.Elapsed.TotalSeconds 'download'; return
     }
     try {
         if ($Arguments) { $p = Start-Process -FilePath $file -ArgumentList $Arguments -PassThru -Wait -WindowStyle Hidden }
         else            { $p = Start-Process -FilePath $file -PassThru -Wait -WindowStyle Hidden }
         $code = $p.ExitCode
-    } catch { Write-Fail $Name $_.Exception.Message; Record $Name 'Failed' $sw.Elapsed.TotalSeconds 'run'; return }
+    } catch { Write-Fail $Name $_.Exception.Message; Set-Step $Key 'Failed' 'run'; Record $Name 'Failed' $sw.Elapsed.TotalSeconds 'run'; return }
 
     Start-Sleep -Milliseconds 400
     $ok = if ($Verify) { & $Verify } else { $code -in 0, 1638, 3010, 1641 }
-    if ($ok) { Write-Ok $Name ("({0:N1}s)" -f $sw.Elapsed.TotalSeconds); Record $Name 'Installed' $sw.Elapsed.TotalSeconds "exit $code" }
-    else     { Write-Fail $Name "installer exit code $code"; Record $Name 'Failed' $sw.Elapsed.TotalSeconds "exit $code" }
+    if ($ok) { Write-Ok $Name ("({0:N1}s)" -f $sw.Elapsed.TotalSeconds); Set-Step $Key 'Done' "exit $code"; Record $Name 'Installed' $sw.Elapsed.TotalSeconds "exit $code" }
+    else     { Write-Fail $Name "installer exit code $code"; Set-Step $Key 'Failed' "exit $code"; Record $Name 'Failed' $sw.Elapsed.TotalSeconds "exit $code" }
 }
 
 # ============================================================================
@@ -274,84 +344,94 @@ function Invoke-Optimizations {
 
     Write-Section 'Optimizing Windows'
 
-    # --- Services ---------------------------------------------------------
-    $svc = @{
-        'SysMain' = 'SysMain'; 'WSearch' = 'Windows Search'; 'DoSvc' = 'Delivery Optimization'
-        'XblAuthManager' = 'Xbox Auth'; 'XblGameSave' = 'Xbox Save'
-        'XboxGipSvc' = 'Xbox GIP'; 'XboxNetApiSvc' = 'Xbox Net'
+    # Each group is state-gated: on a re-run a completed group is shown as
+    # "(done in a previous run)" and skipped. Bodies return their detail string.
+
+    Do-Opt 'services' 'Disable background services' {
+        $svc = @{
+            'SysMain' = 'SysMain'; 'WSearch' = 'Windows Search'; 'DoSvc' = 'Delivery Optimization'
+            'XblAuthManager' = 'Xbox Auth'; 'XblGameSave' = 'Xbox Save'
+            'XboxGipSvc' = 'Xbox GIP'; 'XboxNetApiSvc' = 'Xbox Net'
+        }
+        $done = 0
+        foreach ($s in $svc.Keys) {
+            try {
+                if (Get-Service -Name $s -ErrorAction SilentlyContinue) {
+                    Stop-Service -Name $s -Force -ErrorAction SilentlyContinue
+                    Set-Service  -Name $s -StartupType Disabled -ErrorAction SilentlyContinue
+                    $done++
+                }
+            } catch { }
+        }
+        Write-LogFile "[OPT] services disabled: $done" 'Optimization'
+        "($done of $($svc.Count) present)"
     }
-    $done = 0
-    foreach ($s in $svc.Keys) {
-        try {
-            if (Get-Service -Name $s -ErrorAction SilentlyContinue) {
-                Stop-Service -Name $s -Force -ErrorAction SilentlyContinue
-                Set-Service  -Name $s -StartupType Disabled -ErrorAction SilentlyContinue
-                $done++
-            }
-        } catch { }
+
+    Do-Opt 'gamebar' 'Disable Xbox Game Bar & Game DVR' {
+        Set-Reg 'HKCU:\System\GameConfigStore' 'GameDVR_Enabled' 0
+        Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\GameDVR' 'AllowGameDVR' 0
+        Set-Reg 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\GameDVR' 'AppCaptureEnabled' 0
+        ''
     }
-    Write-Ok 'Disable background services' "($done of $($svc.Count) present)"; Write-LogFile "[OPT] services disabled: $done" 'Optimization'
 
-    # --- Game Bar / Game DVR ---------------------------------------------
-    Set-Reg 'HKCU:\System\GameConfigStore' 'GameDVR_Enabled' 0
-    Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\GameDVR' 'AllowGameDVR' 0
-    Set-Reg 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\GameDVR' 'AppCaptureEnabled' 0
-    Write-Ok 'Disable Xbox Game Bar & Game DVR'
-
-    # --- Consumer experience / suggestions -------------------------------
-    Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent' 'DisableWindowsConsumerFeatures' 1
-    $cdm = 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\ContentDeliveryManager'
-    foreach ($v in 'SubscribedContent-338389Enabled','SubscribedContent-338388Enabled',
-                   'SubscribedContent-338387Enabled','SystemPaneSuggestionsEnabled',
-                   'SoftLandingEnabled','RotatingLockScreenEnabled','RotatingLockScreenOverlayEnabled',
-                   'SilentInstalledAppsEnabled','PreInstalledAppsEnabled','OemPreInstalledAppsEnabled') {
-        Set-Reg $cdm $v 0
+    Do-Opt 'consumer' 'Disable Consumer Experience & suggestions' {
+        Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent' 'DisableWindowsConsumerFeatures' 1
+        $cdm = 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\ContentDeliveryManager'
+        foreach ($v in 'SubscribedContent-338389Enabled','SubscribedContent-338388Enabled',
+                       'SubscribedContent-338387Enabled','SystemPaneSuggestionsEnabled',
+                       'SoftLandingEnabled','RotatingLockScreenEnabled','RotatingLockScreenOverlayEnabled',
+                       'SilentInstalledAppsEnabled','PreInstalledAppsEnabled','OemPreInstalledAppsEnabled') {
+            Set-Reg $cdm $v 0
+        }
+        ''
     }
-    Write-Ok 'Disable Consumer Experience & suggestions'
 
-    # --- Background apps + Store auto-update ------------------------------
-    Set-Reg 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\BackgroundAccessApplications' 'GlobalUserDisabled' 1
-    Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy' 'LetAppsRunInBackground' 2
-    Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\WindowsStore' 'AutoDownload' 2
-    Write-Ok 'Disable Background Apps & auto app updates'
-
-    # --- Power plan + timeouts + hibernation ------------------------------
-    $ult = 'e9a42b02-d5df-448d-aa00-03f14749eb61'
-    powercfg -duplicatescheme $ult 2>$null | Out-Null
-    $act = powercfg -setactive $ult 2>&1
-    if ($LASTEXITCODE -ne 0) { powercfg -setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c 2>$null; $plan = 'High Performance' } else { $plan = 'Ultimate Performance' }
-    foreach ($t in '-standby-timeout-ac 0','-standby-timeout-dc 0','-hibernate-timeout-ac 0',
-                    '-hibernate-timeout-dc 0','-monitor-timeout-ac 0','-monitor-timeout-dc 0') {
-        Start-Process powercfg -ArgumentList "-change $t" -Wait -WindowStyle Hidden -ErrorAction SilentlyContinue
+    Do-Opt 'background' 'Disable Background Apps & auto app updates' {
+        Set-Reg 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\BackgroundAccessApplications' 'GlobalUserDisabled' 1
+        Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy' 'LetAppsRunInBackground' 2
+        Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\WindowsStore' 'AutoDownload' 2
+        ''
     }
-    powercfg -hibernate off 2>$null | Out-Null
-    Set-Reg 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power' 'HiberbootEnabled' 0
-    # USB selective suspend + PCIe ASPM off
-    powercfg -setacvalueindex SCHEME_CURRENT 2a737441-1930-4402-8d77-b2bebba308a3 48e6b7a6-50f5-4782-a5d4-53bb8f07e226 0 2>$null | Out-Null
-    powercfg -setacvalueindex SCHEME_CURRENT 501a4d13-42af-4429-9fd1-a8218c268e20 ee12f906-d277-404b-b6da-e5fa1a576df5 0 2>$null | Out-Null
-    powercfg -setactive SCHEME_CURRENT 2>$null | Out-Null
-    Write-Ok "Power plan → $plan (never sleep/hibernate)"
 
-    # --- System perf tweaks ----------------------------------------------
-    Set-Reg 'HKLM:\SYSTEM\CurrentControlSet\Control\PriorityControl' 'Win32PrioritySeparation' 24
-    Set-Reg 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects' 'VisualFXSetting' 2
-    Set-Reg 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize' 'EnableTransparency' 0
-    Set-Reg 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Serialize' 'StartupDelayInMSec' 0
-    Set-Reg 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Schedule\Maintenance' 'MaintenanceDisabled' 1
-    schtasks /Change /TN '\Microsoft\Windows\Defrag\ScheduledDefrag' /Disable 2>$null | Out-Null
-    Write-Ok 'System performance tweaks (scheduling, visuals, defrag)'
+    Do-Opt 'power' 'Power plan (never sleep/hibernate)' {
+        $ult = 'e9a42b02-d5df-448d-aa00-03f14749eb61'
+        powercfg -duplicatescheme $ult 2>$null | Out-Null
+        powercfg -setactive $ult 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) { powercfg -setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c 2>$null; $plan = 'High Performance' } else { $plan = 'Ultimate Performance' }
+        foreach ($t in '-standby-timeout-ac 0','-standby-timeout-dc 0','-hibernate-timeout-ac 0',
+                        '-hibernate-timeout-dc 0','-monitor-timeout-ac 0','-monitor-timeout-dc 0') {
+            Start-Process powercfg -ArgumentList "-change $t" -Wait -WindowStyle Hidden -ErrorAction SilentlyContinue
+        }
+        powercfg -hibernate off 2>$null | Out-Null
+        Set-Reg 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power' 'HiberbootEnabled' 0
+        powercfg -setacvalueindex SCHEME_CURRENT 2a737441-1930-4402-8d77-b2bebba308a3 48e6b7a6-50f5-4782-a5d4-53bb8f07e226 0 2>$null | Out-Null
+        powercfg -setacvalueindex SCHEME_CURRENT 501a4d13-42af-4429-9fd1-a8218c268e20 ee12f906-d277-404b-b6da-e5fa1a576df5 0 2>$null | Out-Null
+        powercfg -setactive SCHEME_CURRENT 2>$null | Out-Null
+        "→ $plan"
+    }
 
-    # --- Explorer ---------------------------------------------------------
-    $adv = 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced'
-    Set-Reg $adv 'HideFileExt' 0
-    Set-Reg $adv 'Hidden' 1
-    Set-Reg $adv 'LaunchTo' 1
-    Set-Reg $adv 'Start_TrackDocs' 0
-    Set-Reg 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer' 'ShowRecent' 0
-    Set-Reg 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer' 'ShowFrequent' 0
-    Write-Ok 'Explorer (extensions, hidden files, This PC, no recent)'
+    Do-Opt 'system' 'System performance tweaks (scheduling, visuals, defrag)' {
+        Set-Reg 'HKLM:\SYSTEM\CurrentControlSet\Control\PriorityControl' 'Win32PrioritySeparation' 24
+        Set-Reg 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects' 'VisualFXSetting' 2
+        Set-Reg 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize' 'EnableTransparency' 0
+        Set-Reg 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Serialize' 'StartupDelayInMSec' 0
+        Set-Reg 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Schedule\Maintenance' 'MaintenanceDisabled' 1
+        schtasks /Change /TN '\Microsoft\Windows\Defrag\ScheduledDefrag' /Disable 2>$null | Out-Null
+        ''
+    }
 
-    # --- Cleanup ----------------------------------------------------------
+    Do-Opt 'explorer' 'Explorer (extensions, hidden files, This PC, no recent)' {
+        $adv = 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced'
+        Set-Reg $adv 'HideFileExt' 0
+        Set-Reg $adv 'Hidden' 1
+        Set-Reg $adv 'LaunchTo' 1
+        Set-Reg $adv 'Start_TrackDocs' 0
+        Set-Reg 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer' 'ShowRecent' 0
+        Set-Reg 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer' 'ShowFrequent' 0
+        ''
+    }
+
+    # Cleanup runs every time (temp regenerates) — not state-gated.
     $freed = 0
     foreach ($d in $env:TEMP, "$env:SystemRoot\Temp", "$env:SystemRoot\Prefetch") {
         try {
@@ -361,6 +441,7 @@ function Invoke-Optimizations {
         } catch { }
     }
     Write-Ok 'Clean Temp / Windows Temp / Prefetch' "(~$(HB $freed) freed)"
+    Record 'Clean temporary files' 'Optimized' 0 "~$(HB $freed) freed"
     Write-LogFile "[OPT] cleanup freed ~$([int]$freed) bytes" 'Optimization'
 }
 
@@ -417,7 +498,8 @@ function Invoke-Software {
     # DirectX June 2010 runtime (self-extractor → DXSETUP)
     if ($f.InstallDirectX) {
         if ((Test-Path "$env:SystemRoot\System32\d3dx9_43.dll")) {
-            Write-Skip 'DirectX Runtime (June 2010)' '(already present)'; Record 'DirectX' 'Skipped' 0 'present'
+            $why = if (Test-Done 'sw.DirectX') { '(done in a previous run)' } else { '(already present)' }
+            Write-Skip 'DirectX Runtime (June 2010)' $why; Set-Step 'sw.DirectX' 'Done' 'present'; Record 'DirectX' 'Skipped' 0 'present'
         } else {
             $sw = [Diagnostics.Stopwatch]::StartNew()
             $dxSfx = Join-Path $Dl 'directx_redist.exe'; $dxDir = Join-Path $Tmp 'directx'
@@ -426,9 +508,9 @@ function Invoke-Software {
                 Start-Process $dxSfx -ArgumentList "/Q /T:`"$dxDir`" /C" -Wait -WindowStyle Hidden -ErrorAction SilentlyContinue
                 $setup = Join-Path $dxDir 'DXSETUP.exe'
                 if (Test-Path $setup) { Start-Process $setup -ArgumentList '/silent' -Wait -WindowStyle Hidden -ErrorAction SilentlyContinue }
-                if (Test-Path "$env:SystemRoot\System32\d3dx9_43.dll") { Write-Ok 'DirectX Runtime (June 2010)' ("({0:N1}s)" -f $sw.Elapsed.TotalSeconds); Record 'DirectX' 'Installed' $sw.Elapsed.TotalSeconds }
-                else { Write-Fail 'DirectX Runtime (June 2010)' 'DXSETUP did not complete'; Record 'DirectX' 'Failed' $sw.Elapsed.TotalSeconds }
-            } else { Write-Fail 'DirectX Runtime (June 2010)' 'download failed'; Record 'DirectX' 'Failed' $sw.Elapsed.TotalSeconds }
+                if (Test-Path "$env:SystemRoot\System32\d3dx9_43.dll") { Write-Ok 'DirectX Runtime (June 2010)' ("({0:N1}s)" -f $sw.Elapsed.TotalSeconds); Set-Step 'sw.DirectX' 'Done' 'installed'; Record 'DirectX' 'Installed' $sw.Elapsed.TotalSeconds }
+                else { Write-Fail 'DirectX Runtime (June 2010)' 'DXSETUP did not complete'; Set-Step 'sw.DirectX' 'Failed' 'dxsetup'; Record 'DirectX' 'Failed' $sw.Elapsed.TotalSeconds }
+            } else { Write-Fail 'DirectX Runtime (June 2010)' 'download failed'; Set-Step 'sw.DirectX' 'Failed' 'download'; Record 'DirectX' 'Failed' $sw.Elapsed.TotalSeconds }
         }
     } else { Write-Skip 'DirectX Runtime (June 2010)' '(disabled in config)' }
 
@@ -477,11 +559,12 @@ function Install-Roblox {
     $sw = [Diagnostics.Stopwatch]::StartNew()
     $ver = "$env:LOCALAPPDATA\Roblox\Versions"
     if ((Test-Path $ver) -and (Get-ChildItem $ver -Recurse -Filter 'RobloxPlayerBeta.exe' -ErrorAction SilentlyContinue)) {
-        Write-Skip 'Roblox' '(already installed)'; Record 'Roblox' 'Skipped' 0 'present'; return
+        $why = if (Test-Done 'sw.Roblox') { '(done in a previous run)' } else { '(already installed)' }
+        Write-Skip 'Roblox' $why; Set-Step 'sw.Roblox' 'Done' 'present'; Record 'Roblox' 'Skipped' 0 'present'; return
     }
     $boot = Join-Path $Dl 'RobloxPlayerInstaller.exe'
     if (-not (Get-File -Url 'https://www.roblox.com/download/client?os=win' -Dest $boot -Label 'Roblox')) {
-        Write-Fail 'Roblox' 'download failed'; Record 'Roblox' 'Failed' $sw.Elapsed.TotalSeconds; return
+        Write-Fail 'Roblox' 'download failed'; Set-Step 'sw.Roblox' 'Failed' 'download'; Record 'Roblox' 'Failed' $sw.Elapsed.TotalSeconds; return
     }
     Start-Process $boot -WindowStyle Hidden -ErrorAction SilentlyContinue
     $ok = $false
@@ -490,27 +573,28 @@ function Install-Roblox {
         if ((Test-Path $ver) -and (Get-ChildItem $ver -Recurse -Filter 'RobloxPlayerBeta.exe' -ErrorAction SilentlyContinue)) { $ok = $true; break }
     }
     Get-Process RobloxPlayerBeta, RobloxPlayerLauncher, Roblox -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-    if ($ok) { Write-Ok 'Roblox' ("({0:N0}s)" -f $sw.Elapsed.TotalSeconds); Record 'Roblox' 'Installed' $sw.Elapsed.TotalSeconds }
-    else     { Write-Fail 'Roblox' 'player not detected after install'; Record 'Roblox' 'Failed' $sw.Elapsed.TotalSeconds }
+    if ($ok) { Write-Ok 'Roblox' ("({0:N0}s)" -f $sw.Elapsed.TotalSeconds); Set-Step 'sw.Roblox' 'Done' 'installed'; Record 'Roblox' 'Installed' $sw.Elapsed.TotalSeconds }
+    else     { Write-Fail 'Roblox' 'player not detected after install'; Set-Step 'sw.Roblox' 'Failed' 'timeout'; Record 'Roblox' 'Failed' $sw.Elapsed.TotalSeconds }
 }
 
 function Install-RAM {
     $sw = [Diagnostics.Stopwatch]::StartNew()
     $dir = "$env:ProgramFiles\Roblox Account Manager"
     if ((Test-Path $dir) -and (Get-ChildItem $dir -Filter '*.exe' -ErrorAction SilentlyContinue)) {
-        Write-Skip 'Roblox Account Manager' '(already installed)'; Record 'Roblox Account Manager' 'Skipped' 0 'present'; return
+        $why = if (Test-Done 'sw.RAM') { '(done in a previous run)' } else { '(already installed)' }
+        Write-Skip 'Roblox Account Manager' $why; Set-Step 'sw.RAM' 'Done' 'present'; Record 'Roblox Account Manager' 'Skipped' 0 'present'; return
     }
     $zip = Join-Path $Dl 'RobloxAccountManager.zip'
     if (-not (Get-File -Url 'https://github.com/ic3w0lf22/Roblox-Account-Manager/releases/latest/download/RobloxAccountManager.zip' -Dest $zip -Label 'Roblox Account Manager' -Ext '.zip')) {
-        Write-Fail 'Roblox Account Manager' 'download failed'; Record 'Roblox Account Manager' 'Failed' $sw.Elapsed.TotalSeconds; return
+        Write-Fail 'Roblox Account Manager' 'download failed'; Set-Step 'sw.RAM' 'Failed' 'download'; Record 'Roblox Account Manager' 'Failed' $sw.Elapsed.TotalSeconds; return
     }
     try {
         $null = New-Item -ItemType Directory -Force -Path $dir
         Expand-Archive -Path $zip -DestinationPath $dir -Force
         $exe = Get-ChildItem $dir -Recurse -Filter '*.exe' | Select-Object -First 1
-        if ($exe) { Write-Ok 'Roblox Account Manager' ("({0:N1}s)" -f $sw.Elapsed.TotalSeconds); Record 'Roblox Account Manager' 'Installed' $sw.Elapsed.TotalSeconds }
-        else { Write-Fail 'Roblox Account Manager' 'no exe in archive'; Record 'Roblox Account Manager' 'Failed' $sw.Elapsed.TotalSeconds }
-    } catch { Write-Fail 'Roblox Account Manager' $_.Exception.Message; Record 'Roblox Account Manager' 'Failed' $sw.Elapsed.TotalSeconds }
+        if ($exe) { Write-Ok 'Roblox Account Manager' ("({0:N1}s)" -f $sw.Elapsed.TotalSeconds); Set-Step 'sw.RAM' 'Done' 'installed'; Record 'Roblox Account Manager' 'Installed' $sw.Elapsed.TotalSeconds }
+        else { Write-Fail 'Roblox Account Manager' 'no exe in archive'; Set-Step 'sw.RAM' 'Failed' 'no-exe'; Record 'Roblox Account Manager' 'Failed' $sw.Elapsed.TotalSeconds }
+    } catch { Write-Fail 'Roblox Account Manager' $_.Exception.Message; Set-Step 'sw.RAM' 'Failed' 'extract'; Record 'Roblox Account Manager' 'Failed' $sw.Elapsed.TotalSeconds }
 }
 
 # ============================================================================
@@ -518,25 +602,33 @@ function Install-RAM {
 # ============================================================================
 function Write-Summary {
     $elapsed = (Get-Date) - $script:StartTime
-    $ins = @($script:Results | Where-Object Status -eq 'Installed')
-    $skp = @($script:Results | Where-Object Status -eq 'Skipped')
+    $ins  = @($script:Results | Where-Object Status -eq 'Installed')
+    $opt  = @($script:Results | Where-Object Status -eq 'Optimized')
+    $skp  = @($script:Results | Where-Object Status -eq 'Skipped')
     $fail = @($script:Results | Where-Object Status -eq 'Failed')
+    # "Newly done" = things this run actually changed (not skipped from a prior run).
+    $newlyDone = $ins.Count + $opt.Count + $fail.Count
+    $resumed   = ($script:PriorDone -gt 0)
 
     Write-Host ''
     Write-Host '  ╔════════════════════════════════════════════════════╗' -ForegroundColor Cyan
-    $head = if ($fail.Count) { "Deployment Complete — $($fail.Count) failed" } else { 'Deployment Complete' }
+    $head = if ($fail.Count) { "Deployment Complete — $($fail.Count) failed" }
+            elseif ($resumed -and $newlyDone -eq 0) { 'Already Complete — nothing to do' }
+            else { 'Deployment Complete' }
     Write-Host ('  ║  {0,-49} ║' -f $head) -ForegroundColor White
     Write-Host '  ╚════════════════════════════════════════════════════╝' -ForegroundColor Cyan
-    Write-Host ("   Installed {0}   ·   Skipped {1}   ·   Failed {2}" -f $ins.Count, $skp.Count, $fail.Count) -ForegroundColor Gray
+    Write-Host ("   Optimized {0}   ·   Installed {1}   ·   Skipped {2}   ·   Failed {3}" -f $opt.Count, $ins.Count, $skp.Count, $fail.Count) -ForegroundColor Gray
+    if ($resumed) { Write-Host ("   Resumed from a previous run ({0} step(s) were already done)." -f $script:PriorDone) -ForegroundColor DarkCyan }
     Write-Host ("   Elapsed   {0:hh\:mm\:ss}" -f $elapsed) -ForegroundColor Gray
     Write-Host ("   Logs      {0}" -f $Logs) -ForegroundColor DarkGray
+    Write-Host ("   State     {0}" -f $StateFile) -ForegroundColor DarkGray
     if ($fail.Count) {
         Write-Host ''
-        Write-Host '   Failed operations:' -ForegroundColor Red
+        Write-Host '   Failed operations (re-run to retry them):' -ForegroundColor Red
         foreach ($x in $fail) { Write-Host ("     ✖ {0}  {1}" -f $x.Name, $x.Detail) -ForegroundColor Red }
     }
     Write-Host ''
-    Write-LogFile "[DONE] installed=$($ins.Count) skipped=$($skp.Count) failed=$($fail.Count) elapsed=$($elapsed.ToString('hh\:mm\:ss'))"
+    Write-LogFile "[DONE] optimized=$($opt.Count) installed=$($ins.Count) skipped=$($skp.Count) failed=$($fail.Count) elapsed=$($elapsed.ToString('hh\:mm\:ss'))"
 
     if ($Config.CleanupOnFinish) {
         Remove-Item "$Dl\*", "$Tmp\*" -Recurse -Force -ErrorAction SilentlyContinue
@@ -552,7 +644,9 @@ function Write-Summary {
 # ============================================================================
 try {
     Write-Banner
-    Write-LogFile '════ Roblox Server Deployment started ════'
+    Get-State                 # load checkpoint from any previous run
+    Show-Resume               # tell the user what's already done
+    Write-LogFile "════ Roblox Server Deployment started (resuming $($script:PriorDone) prior step(s)) ════"
     Invoke-Optimizations
     Invoke-Software
     Write-Summary
