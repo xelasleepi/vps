@@ -91,11 +91,14 @@ Mem Reduct here (smarter + Roblox-aware); set `InstallMemReduct = $true` in
 **Hardware & drivers** — detects CPU / GPU(s) / board / RAM, flags any device
 missing a driver (`ConfigManagerErrorCode`), and installs the latest **signed**
 drivers via Windows Update (covers GPU/NIC/chipset). VM-aware: on a hypervisor it
-skips desktop-GPU advice (those are guest tools). When Windows Update lags on GPU
-drivers it prints the vendor's official download page. Toggle with `UpdateDrivers`.
-Per-vendor "latest GPU driver" scrapers are intentionally **not** embedded (they
-break constantly); ask if your box is bare-metal NVIDIA and a scripted install can
-be added.
+skips desktop-GPU advice (those are guest tools). Toggle with `UpdateDrivers`.
+
+For a **bare-metal NVIDIA GPU** it goes further and fetches the latest **Game Ready
+Driver straight from NVIDIA** (`UpdateNvidiaDriver`): it queries NVIDIA's driver API
+for the current version, compares it to the installed version (only downloading the
+~900 MB package when it's actually newer), builds the correct desktop/notebook DCH
+URL, and silent-installs (`-s -noreboot -clean`). AMD/Intel have no clean public
+driver API, so those stay on Windows Update + a link to the vendor page.
 
 **Every action is logged** to `C:\ProgramData\RobloxDeploy\logs\`:
 `install.log`, `errors.log`, `downloads.log`, `optimization.log`, `software.log`.

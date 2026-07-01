@@ -60,6 +60,7 @@ $Config = [ordered]@{
     Features = [ordered]@{
         OptimizeWindows            = $true
         UpdateDrivers              = $true   # detect hardware + install latest drivers via Windows Update
+        UpdateNvidiaDriver         = $true   # if a bare-metal NVIDIA GPU is found, fetch the latest driver from NVIDIA directly
         InstallWinRAR              = $true
         InstallVisualCpp           = $true
         InstallDotNet              = $true
@@ -414,6 +415,70 @@ function Update-DriversViaWindowsUpdate {
     }
 }
 
+# Reads the installed NVIDIA driver version from WMI and converts the Windows
+# driver string (e.g. 32.0.16.1062) to NVIDIA's form (610.62) — the last 5 digits.
+function Get-InstalledNvidiaVersion {
+    $dv = (Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue |
+           Where-Object { $_.Name -match 'NVIDIA' } | Select-Object -First 1).DriverVersion
+    if (-not $dv) { return $null }
+    $d = ($dv -replace '\.', '')
+    if ($d.Length -lt 5) { return $null }
+    ($d.Substring($d.Length - 5)).Insert(3, '.')
+}
+
+# Queries NVIDIA's driver-lookup API for the latest Game Ready Driver version, then
+# builds the desktop/notebook package URL (drivers are unified across GeForce, so
+# the version is the same for every modern card). Returns @{Version;Url} or $null.
+function Get-NvidiaLatest {
+    param([bool]$Notebook)
+    try {
+        $osid = if ([Environment]::OSVersion.Version.Build -ge 22000) { 135 } else { 57 }  # Win11 : Win10
+        $api  = 'https://gfwsl.geforce.com/services_toolkit/services/com/nvidia/services/AjaxDriverService.php'
+        $q    = "$api`?func=DriverManualLookup&psid=127&pfid=1005&osID=$osid&languageCode=1033&isWHQL=1&dch=1&sort1=0&numberOfResults=1"
+        $body = (Invoke-WebRequest -Uri $q -UseBasicParsing -TimeoutSec 30).Content
+        $ver  = [regex]::Match($body, '"Version"\s*:\s*"([\d.]+)"').Groups[1].Value
+        if (-not $ver) { return $null }
+        $type = if ($Notebook) { 'notebook' } else { 'desktop' }
+        $url  = "https://us.download.nvidia.com/Windows/$ver/$ver-$type-win10-win11-64bit-international-dch-whql.exe"
+        # Verify the constructed package actually exists before returning it.
+        try { if ((Invoke-WebRequest -Uri $url -Method Head -UseBasicParsing -TimeoutSec 30).StatusCode -ne 200) { return $null } } catch { return $null }
+        [pscustomobject]@{ Version = $ver; Url = $url }
+    } catch { Write-LogFile "[WARN] NVIDIA lookup failed: $($_.Exception.Message)" 'Software'; return $null }
+}
+
+# Fetches + silently installs the latest NVIDIA driver straight from NVIDIA, but
+# only when it's actually newer than what's installed.
+function Install-NvidiaDriver([string]$gpuName) {
+    $installed = Get-InstalledNvidiaVersion
+    $notebook  = $gpuName -match 'Laptop|Mobile|Max-Q'
+    $latest    = Get-NvidiaLatest -Notebook $notebook
+    if (-not $latest) { Write-Skip 'NVIDIA driver' '(NVIDIA lookup unavailable)'; Record 'NVIDIA driver' 'Skipped' 0 'lookup'; return }
+
+    if ($installed -and ([double]$installed -ge [double]$latest.Version)) {
+        Write-Skip 'NVIDIA driver' "(up to date — $installed)"; Set-Step 'sw.NvidiaDriver' 'Done' $installed; Record 'NVIDIA driver' 'Skipped' 0 "$installed"; return
+    }
+
+    $have = if ($installed) { $installed } else { 'none' }
+    Write-Info ("NVIDIA driver: installed {0} -> latest {1} (~900 MB)" -f $have, $latest.Version)
+    $file = Join-Path $Dl ("nvidia-{0}.exe" -f $latest.Version)
+    if (-not (Get-File -Url $latest.Url -Dest $file -Label ("NVIDIA {0}" -f $latest.Version))) {
+        Write-Fail 'NVIDIA driver' 'download failed'; Set-Step 'sw.NvidiaDriver' 'Failed' 'download'; Record 'NVIDIA driver' 'Failed' 0; return
+    }
+
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    try {
+        $p = Start-Process -FilePath $file -ArgumentList '-s -noreboot -clean' -PassThru -WindowStyle Hidden
+        if (-not $p.WaitForExit(900 * 1000)) { taskkill /F /T /PID $p.Id 2>$null | Out-Null }
+    } catch { Write-LogFile "[WARN] NVIDIA setup: $($_.Exception.Message)" 'Software' }
+
+    $now = Get-InstalledNvidiaVersion
+    if ($now -and ([double]$now -ge [double]$latest.Version)) {
+        Write-Ok 'NVIDIA driver' ("updated to {0} ({1:N0}s)" -f $latest.Version, $sw.Elapsed.TotalSeconds); Set-Step 'sw.NvidiaDriver' 'Done' $latest.Version; Record 'NVIDIA driver' 'Optimized' 0 $latest.Version
+    } else {
+        Write-Ok 'NVIDIA driver' ("installer ran for {0} — applies after reboot" -f $latest.Version); Set-Step 'sw.NvidiaDriver' 'Done' 'pending-reboot'; Record 'NVIDIA driver' 'Optimized' 0 'installer ran'
+    }
+}
+
 # Detects hardware, flags devices missing drivers, and installs the latest drivers
 # via Windows Update. VM-aware (skips desktop-GPU advice on a hypervisor).
 function Invoke-Drivers {
@@ -451,11 +516,16 @@ function Invoke-Drivers {
     elseif ($n -eq 0) { Write-Ok   'Latest drivers via Windows Update' 'already up to date'; Record 'Driver update' 'Optimized' 0 'up to date' }
     else              { Write-Skip 'Latest drivers via Windows Update' '(WU unavailable on this OS)'; Record 'Driver update' 'Skipped' 0 'no WU' }
 
-    # GPU vendor: point at the official latest-driver page (WU can lag on GPUs).
+    # GPU drivers: fetch NVIDIA's latest directly from NVIDIA (WU lags months on
+    # GPUs); for AMD/Intel there's no clean public API, so link the vendor page.
     if (-not $isVM) {
         foreach ($g in $gpus) {
-            $u = Get-VendorDriverUrl $g
-            if ($u) { Write-Info ("Newest {0} driver (if WU lags): {1}" -f (($g -split ' ')[0]), $u) }
+            if (($g -match 'NVIDIA|GeForce|RTX|GTX|Quadro') -and $Config.Features.UpdateNvidiaDriver) {
+                Install-NvidiaDriver $g
+            } else {
+                $u = Get-VendorDriverUrl $g
+                if ($u) { Write-Info ("Newest {0} driver (if WU lags): {1}" -f (($g -split ' ')[0]), $u) }
+            }
         }
     }
 }
