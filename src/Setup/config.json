@@ -89,7 +89,7 @@
 
     "memReduct": {
       "name": "Mem Reduct",
-      "url": "https://github.com/henrypp/memreduct/releases/download/v3.4/memreduct-3.4-setup.exe",
+      "url": "https://github.com/henrypp/memreduct/releases/download/v.3.5.2/memreduct-3.5.2-setup.exe",
       "wingetId": "Henry++.MemReduct",
       "sha256": "",
       "installerFileName": "memreduct-setup.exe",
@@ -107,7 +107,7 @@
 
     "robloxAccountManager": {
       "name": "Roblox Account Manager",
-      "url": "https://github.com/ic3w0lf22/Roblox-Account-Manager/releases/latest/download/RobloxAccountManager.zip",
+      "url": "https://github.com/ic3w0lf22/Roblox-Account-Manager/releases/download/3.7.2/Roblox.Account.Manager.3.7.2.zip",
       "wingetId": "",
       "sha256": "",
       "installerFileName": "RobloxAccountManager.zip",

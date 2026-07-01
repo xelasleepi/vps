@@ -267,6 +267,24 @@ function Get-File {
     return $false
 }
 
+# Resolves the download URL of the latest GitHub release asset matching a
+# wildcard (e.g. '*setup.exe'). GitHub asset names include the version, so a
+# fixed URL breaks on every new release — this keeps the script future-proof.
+# Returns $null on any failure (caller falls back to a pinned URL).
+function Get-GitHubAsset {
+    param([string]$Repo, [string]$Match)
+    try {
+        $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest" `
+            -Headers @{ 'User-Agent' = 'SetupDeployer'; 'Accept' = 'application/vnd.github+json' } `
+            -TimeoutSec 30
+        $asset = $rel.assets | Where-Object { $_.name -like $Match } | Select-Object -First 1
+        if ($asset) { return $asset.browser_download_url }
+    } catch {
+        Write-LogFile "[WARN] GitHub asset resolve failed for $Repo ($Match): $($_.Exception.Message)" 'Downloads'
+    }
+    return $null
+}
+
 # ============================================================================
 #  6. Detection + registry helpers
 # ============================================================================
@@ -303,7 +321,8 @@ function Install-Item {
     param(
         [string]$Name, [string]$Url, [string]$Arguments,
         [scriptblock]$Detect, [scriptblock]$Verify,
-        [string]$Sha256, [string]$Ext = '.exe', [bool]$Enabled = $true, [string]$Key
+        [string]$Sha256, [string]$Ext = '.exe', [bool]$Enabled = $true, [string]$Key,
+        [string]$Repo, [string]$AssetMatch
     )
     if (-not $Enabled) { Write-Skip $Name '(disabled in config)'; Record $Name 'Skipped' 0 'disabled'; return }
     if (-not $Key) { $Key = 'sw.' + ($Name -replace '[^\w]', '') }
@@ -319,6 +338,14 @@ function Install-Item {
     if (-not $Detect -and (Test-Done $Key)) {
         Write-Skip $Name '(done in a previous run)'; Record $Name 'Skipped' 0 'state'; return
     }
+
+    # Resolve a versioned GitHub asset (only now that we actually need to
+    # download), falling back to the pinned -Url if the API is unreachable.
+    if ($Repo -and $AssetMatch) {
+        $resolved = Get-GitHubAsset -Repo $Repo -Match $AssetMatch
+        if ($resolved) { $Url = $resolved }
+    }
+    if (-not $Url) { Write-Fail $Name 'no download URL available'; Set-Step $Key 'Failed' 'nourl'; Record $Name 'Failed' 0 'nourl'; return }
 
     $file = Join-Path $Dl (($Name -replace '[^\w]', '_') + $Ext)
     if (-not (Get-File -Url $Url -Dest $file -Label $Name -Sha256 $Sha256)) {
@@ -514,9 +541,11 @@ function Invoke-Software {
         }
     } else { Write-Skip 'DirectX Runtime (June 2010)' '(disabled in config)' }
 
-    # Mem Reduct + configuration
+    # Mem Reduct + configuration. Asset name is versioned, so resolve the latest
+    # from GitHub (pinned fallback keeps it working if the API is unreachable).
     Install-Item -Name 'Mem Reduct' -Enabled $f.InstallMemReduct `
-        -Url 'https://github.com/henrypp/memreduct/releases/download/v3.4/memreduct-3.4-setup.exe' `
+        -Repo 'henrypp/memreduct' -AssetMatch '*setup.exe' `
+        -Url 'https://github.com/henrypp/memreduct/releases/download/v.3.5.2/memreduct-3.5.2-setup.exe' `
         -Arguments '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /NOICONS' `
         -Detect { (Test-Path "$env:ProgramFiles\Mem Reduct\memreduct.exe") -or (Test-UninstallName 'Mem Reduct') } `
         -Verify { Test-Path "$env:ProgramFiles\Mem Reduct\memreduct.exe" }
@@ -584,8 +613,12 @@ function Install-RAM {
         $why = if (Test-Done 'sw.RAM') { '(done in a previous run)' } else { '(already installed)' }
         Write-Skip 'Roblox Account Manager' $why; Set-Step 'sw.RAM' 'Done' 'present'; Record 'Roblox Account Manager' 'Skipped' 0 'present'; return
     }
+    # The release asset name is versioned (e.g. Roblox.Account.Manager.3.7.2.zip),
+    # so resolve the latest .zip dynamically with a pinned fallback.
+    $ramUrl = Get-GitHubAsset -Repo 'ic3w0lf22/Roblox-Account-Manager' -Match '*.zip'
+    if (-not $ramUrl) { $ramUrl = 'https://github.com/ic3w0lf22/Roblox-Account-Manager/releases/download/3.7.2/Roblox.Account.Manager.3.7.2.zip' }
     $zip = Join-Path $Dl 'RobloxAccountManager.zip'
-    if (-not (Get-File -Url 'https://github.com/ic3w0lf22/Roblox-Account-Manager/releases/latest/download/RobloxAccountManager.zip' -Dest $zip -Label 'Roblox Account Manager' -Ext '.zip')) {
+    if (-not (Get-File -Url $ramUrl -Dest $zip -Label 'Roblox Account Manager' -Ext '.zip')) {
         Write-Fail 'Roblox Account Manager' 'download failed'; Set-Step 'sw.RAM' 'Failed' 'download'; Record 'Roblox Account Manager' 'Failed' $sw.Elapsed.TotalSeconds; return
     }
     try {
