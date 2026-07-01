@@ -375,6 +375,53 @@ function Install-Item {
 # ============================================================================
 #  8. Windows optimization
 # ============================================================================
+# Makes the run reversible: exports the registry subtrees this script modifies,
+# and (once per machine) creates a System Restore point. On Tiny10 System Restore
+# is often stripped, so the .reg exports are the primary rollback path.
+function New-SafetyBackup {
+    Write-Section 'Safety backup (reversibility)'
+    $backupDir = Join-Path $Root 'backup'
+    $null = New-Item -ItemType Directory -Force -Path $backupDir
+    $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+
+    $targets = [ordered]@{
+        'multimedia'   = 'HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile'
+        'power'        = 'HKLM\SYSTEM\CurrentControlSet\Control\Power'
+        'priority'     = 'HKLM\SYSTEM\CurrentControlSet\Control\PriorityControl'
+        'memmgmt'      = 'HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management'
+        'graphics'     = 'HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers'
+        'desktop'      = 'HKCU\Control Panel\Desktop'
+        'mouse'        = 'HKCU\Control Panel\Mouse'
+        'explorer-adv' = 'HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced'
+        'gamestore'    = 'HKCU\System\GameConfigStore'
+    }
+    $n = 0
+    foreach ($k in $targets.Keys) {
+        $out = Join-Path $backupDir ('{0}_{1}.reg' -f $stamp, $k)
+        reg export $targets[$k] $out /y 2>$null | Out-Null
+        if (Test-Path $out) { $n++ }
+    }
+    Write-Ok 'Registry backup' "($n subtrees -> $backupDir)"
+    Write-LogFile "[BACKUP] exported $n registry subtrees to $backupDir" 'Install'
+
+    # System Restore point — best-effort, once per machine per deployment.
+    if (-not (Test-Done 'safety.restorepoint')) {
+        try {
+            Enable-ComputerRestore -Drive "$env:SystemDrive\" -ErrorAction SilentlyContinue
+            Set-Reg 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\SystemRestore' 'SystemRestorePointCreationFrequency' 0
+            Write-Host '   Creating restore point (may take up to a minute)…' -ForegroundColor DarkGray
+            Checkpoint-Computer -Description 'Before Roblox Server Deployment' -RestorePointType 'MODIFY_SETTINGS' -ErrorAction Stop
+            Write-Ok 'System Restore point created'
+            Set-Step 'safety.restorepoint' 'Done' $stamp
+        } catch {
+            Write-Skip 'System Restore point' '(unavailable on this OS — the registry export is your rollback)'
+        }
+    } else {
+        Write-Skip 'System Restore point' '(already created in an earlier run)'
+    }
+    Record 'Safety backup' 'Optimized' 0 "$n reg subtrees exported"
+}
+
 function Invoke-Optimizations {
     if (-not $Config.Features.OptimizeWindows) { Write-Info 'Optimization disabled by config.'; return }
 
@@ -498,8 +545,10 @@ function Invoke-Optimizations {
         ''
     }
 
-    Do-Opt 'cpumem' 'CPU & memory (no throttle, unpark, boost, caches off)' {
-        Set-Reg 'HKLM:\SYSTEM\CurrentControlSet\Control\Power\PowerThrottling' 'PowerThrottlingOff' 1   # cpu.no-throttle
+    Do-Opt 'cpumem' 'CPU & memory (core unpark, boost, caches off)' {
+        # NOTE: Power Throttling is deliberately left ENABLED. Loafy uses EcoQoS
+        # (POWER_THROTTLING_EXECUTION_SPEED) to park idle Roblox instances on
+        # E-cores; a global PowerThrottlingOff=1 would defeat that. Do not re-add.
         # No core parking + aggressive boost (cpu.no-park / cpu.boost-aggressive)
         powercfg -setacvalueindex SCHEME_CURRENT SUB_PROCESSOR 0cc5b647-c1df-4637-891a-dec35c318583 100 2>$null | Out-Null
         powercfg -setacvalueindex SCHEME_CURRENT SUB_PROCESSOR be337238-0d82-4146-a960-4f3749d470c7 2 2>$null | Out-Null
@@ -589,7 +638,7 @@ reg add "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\kernel" /v Global
 reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games" /v "GPU Priority" /t REG_DWORD /d 8 /f >nul 2>&1
 reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games" /v "Priority" /t REG_DWORD /d 6 /f >nul 2>&1
 reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games" /v "Scheduling Category" /t REG_SZ /d High /f >nul 2>&1
-reg add "HKLM\SYSTEM\CurrentControlSet\Control\Power\PowerThrottling" /v PowerThrottlingOff /t REG_DWORD /d 1 /f >nul 2>&1
+REM (Power Throttling left ON on purpose — Loafy's EcoQoS depends on it.)
 reg add "HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" /v TdrDelay /t REG_DWORD /d 10 /f >nul 2>&1
 reg add "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management" /v LargeSystemCache /t REG_DWORD /d 0 /f >nul 2>&1
 reg add "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management" /v ClearPageFileAtShutdown /t REG_DWORD /d 0 /f >nul 2>&1
@@ -763,18 +812,22 @@ function Install-Loafy {
     $sw  = [Diagnostics.Stopwatch]::StartNew()
     $dir = Join-Path $env:ProgramData 'Loafy'          # C:\ProgramData\Loafy — no spaces (schtasks-friendly)
     $exe = Join-Path $dir 'Loafy.exe'
-    # SHA-256 of the current release build (informational; left unpinned so a
-    # freshly-rebuilt release doesn't break the download):
-    #   64bd3defce9d4cf7ea8280adaa1a94ac3c9d10a430cc0e0987f6b260542dbac7
     $url = 'https://github.com/xelasleepi/vps/releases/download/loafy/Loafy.exe'
 
     if ((Test-Path $exe) -and (Test-Done 'sw.Loafy')) {
         Write-Skip 'Loafy (Roblox optimizer)' '(done in a previous run)'; Record 'Loafy' 'Skipped' 0 'present'; return
     }
 
+    # Fetch the expected SHA-256 from the release's own sidecar so the elevated
+    # exe is integrity-verified. The sidecar is re-uploaded with every rebuild,
+    # so this stays correct without hardcoding a hash. If the sidecar is
+    # unreachable, $expected stays null and Get-File just skips verification.
+    $expected = $null
+    try { $expected = ((Invoke-WebRequest "$url.sha256" -UseBasicParsing -TimeoutSec 30).Content -split '\s+')[0].Trim() } catch { }
+
     $null = New-Item -ItemType Directory -Force -Path $dir
     taskkill /F /IM Loafy.exe 2>$null | Out-Null       # stop a running copy so we can overwrite
-    if (-not (Get-File -Url $url -Dest $exe -Label 'Loafy (Roblox optimizer)')) {
+    if (-not (Get-File -Url $url -Dest $exe -Label 'Loafy (Roblox optimizer)' -Sha256 $expected)) {
         Write-Fail 'Loafy (Roblox optimizer)' 'download failed'; Set-Step 'sw.Loafy' 'Failed' 'download'; Record 'Loafy' 'Failed' $sw.Elapsed.TotalSeconds; return
     }
 
@@ -893,6 +946,7 @@ function Write-Summary {
     Write-Host ("   Elapsed   {0:hh\:mm\:ss}" -f $elapsed) -ForegroundColor Gray
     Write-Host ("   Logs      {0}" -f $Logs) -ForegroundColor DarkGray
     Write-Host ("   State     {0}" -f $StateFile) -ForegroundColor DarkGray
+    Write-Host ("   Rollback  {0}  (restore point + .reg exports)" -f (Join-Path $Root 'backup')) -ForegroundColor DarkGray
     if ($fail.Count) {
         Write-Host ''
         Write-Host '   Failed operations (re-run to retry them):' -ForegroundColor Red
@@ -918,6 +972,7 @@ try {
     Get-State                 # load checkpoint from any previous run
     Show-Resume               # tell the user what's already done
     Write-LogFile "════ Roblox Server Deployment started (resuming $($script:PriorDone) prior step(s)) ════"
+    New-SafetyBackup          # restore point + registry export BEFORE any changes
     Invoke-Optimizations
     Invoke-Software
     Write-Summary

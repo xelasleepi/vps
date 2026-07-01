@@ -107,6 +107,17 @@ Mem Reduct here (smarter + Roblox-aware); set `InstallMemReduct = $true` in
 - **Roblox verify** — installs Roblox, launches it to confirm the player process
   is actually alive, then force-kills it (`taskkill /F`) and continues, so the
   run stays unattended and never hangs.
+- **Reversible** — before touching anything it exports the registry subtrees it
+  will modify to `C:\ProgramData\RobloxDeploy\backup\*.reg` and (once, where
+  supported) creates a System Restore point. Undo a tweak by double-clicking the
+  matching `.reg`.
+- **Integrity-checked exe** — the elevated `Loafy.exe` is verified against a
+  SHA-256 sidecar published with the release, so a corrupted/tampered download is
+  rejected.
+- **Timeout-guarded installs** — every installer runs with a hard timeout; a
+  silent installer that hangs is killed and verified, never freezing the run.
+- **Plays nice with Loafy** — the optimizer deliberately leaves Windows Power
+  Throttling **on** so Loafy's EcoQoS can still park idle Roblox instances.
 
 ## Configuration
 
