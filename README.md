@@ -54,6 +54,17 @@ power management off; applies background-services scheduling, best-performance
 visual effects and Explorer tweaks (show extensions/hidden files, open This PC, no
 recent/frequent); cleans Temp, Windows Temp and Prefetch.
 
+**loafy-optimizer core** (extra latency/gaming tuning) — network throttling off +
+Nagle disabled for lower latency, gaming GPU/CPU task priorities, prefetch/superfetch
+off, NTFS last-access + 8.3 names off, CPU power-throttling off, telemetry off
+(DiagTrack / Cortana / Widgets / Error Reporting), zero menu-show delay and mouse
+acceleration off. All of it re-applies **every run** (it's cheap and idempotent).
+
+**Stays optimized after reboots** — writes `vps-opti.bat` and registers a
+highest-privilege **logon scheduled task `VPS-Opti`** that re-asserts the
+drift-prone tweaks (disabled services, key registry values, power plan) at every
+startup, so a Windows update can't quietly undo them.
+
 **Installs software** (detect → skip if present → silent install → verify):
 WinRAR · Visual C++ Redistributables 2005–2022 (x86 + x64) · .NET Framework 4.8 ·
 .NET Desktop Runtime 8 · Edge WebView2 · DirectX June 2010 runtime · **Mem Reduct**
@@ -69,12 +80,16 @@ WinRAR · Visual C++ Redistributables 2005–2022 (x86 + x64) · .NET Framework 
   progress + speed, optional SHA-256 verification.
 - **Resilient** — every step reports `SUCCESS` / `SKIPPED` / `FAILED` with elapsed
   time; a failure never aborts the run, it's collected and shown in the summary.
-- **Idempotent** — re-running skips anything already installed/applied.
-- **Smart resume** — every finished step is checkpointed to
-  `C:\ProgramData\RobloxDeploy\state.json`. If you close it midway or the box
-  reboots, just run the one-liner again: it shows what's already done
-  (`↷ … (done in a previous run)`), retries only what failed, and continues.
-  Start completely fresh with `$env:DEPLOY_RESET='1'; irm … | iex`.
+- **Smart re-run (no flags needed)** — just run the one-liner again anytime.
+  Installed software is detected and skipped (`↷ … already installed`), only
+  failures are retried, and installs are checkpointed to
+  `C:\ProgramData\RobloxDeploy\state.json` so a mid-run close/reboot resumes
+  cleanly. Optimizations simply re-apply (they're instant), so the box is always
+  fully tuned. There's an escape hatch — `$env:DEPLOY_RESET='1'` forces installs
+  to re-download — but you rarely need it.
+- **Roblox verify** — installs Roblox, launches it to confirm the player process
+  is actually alive, then force-kills it (`taskkill /F`) and continues, so the
+  run stays unattended and never hangs.
 
 ## Configuration
 

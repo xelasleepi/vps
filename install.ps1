@@ -136,28 +136,26 @@ function Set-Step([string]$Key, [string]$Status, [string]$Detail = '') {
     Save-State
 }
 
-# Runs a state-gated optimization step. The $Body returns a short detail string;
-# on rerun a completed step is skipped without redoing the work.
+# Runs an optimization step. Optimizations are cheap + idempotent, so they
+# ALWAYS re-apply on every run (no checkpoint gate) — that keeps the box
+# optimized even after a Windows update resets something, and means a plain
+# re-run is always correct without any reset flag. The $Body returns a short
+# detail string shown next to the ✔.
 function Do-Opt {
     param([string]$Key, [string]$Name, [scriptblock]$Body)
-    $sk = "opt.$Key"
-    if (Test-Done $sk) { Write-Skip $Name '(done in a previous run)'; Record $Name 'Skipped' 0 'state'; return }
     try {
         $detail = & $Body
         Write-Ok $Name $detail
-        Set-Step $sk 'Done' "$detail"
         Record $Name 'Optimized' 0 "$detail"
     } catch {
         Write-Fail $Name $_.Exception.Message
-        Set-Step $sk 'Failed' $_.Exception.Message
         Record $Name 'Failed' 0 $_.Exception.Message
     }
 }
 
 function Show-Resume {
     if ($script:PriorDone -gt 0) {
-        Write-Host "   ⟳ Resuming — $($script:PriorDone) step(s) already completed earlier; continuing where it left off." -ForegroundColor DarkCyan
-        Write-Host "     (run with `$env:DEPLOY_RESET='1' to start fresh)" -ForegroundColor DarkGray
+        Write-Host "   ⟳ Smart re-run — $($script:PriorDone) item(s) already installed; skipping those, doing the rest." -ForegroundColor DarkCyan
         Write-Host ''
     }
 }
@@ -458,6 +456,62 @@ function Invoke-Optimizations {
         ''
     }
 
+    # ---- loafy-optimizer core: curated latency / gaming / responsiveness ----
+    Do-Opt 'netlatency' 'Network latency & responsiveness (throttling, Nagle off)' {
+        Set-Reg 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile' 'NetworkThrottlingIndex' 0xffffffff
+        Set-Reg 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile' 'SystemResponsiveness' 0
+        $ifs = 'HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces'
+        Get-ChildItem $ifs -ErrorAction SilentlyContinue | ForEach-Object {
+            Set-Reg $_.PSPath 'TcpAckFrequency' 1
+            Set-Reg $_.PSPath 'TCPNoDelay' 1
+        }
+        ''
+    }
+
+    Do-Opt 'gaming' 'Gaming task priorities (GPU/CPU scheduling)' {
+        $g = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games'
+        Set-Reg $g 'GPU Priority' 8
+        Set-Reg $g 'Priority' 6
+        Set-Reg $g 'Scheduling Category' 'High' 'String'
+        Set-Reg $g 'SFIO Priority' 'High' 'String'
+        ''
+    }
+
+    Do-Opt 'storagemem' 'Storage & memory (prefetch off, NTFS, power throttling off)' {
+        $mm = 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management\PrefetchParameters'
+        Set-Reg $mm 'EnablePrefetcher' 0
+        Set-Reg $mm 'EnableSuperfetch' 0
+        Set-Reg 'HKLM:\SYSTEM\CurrentControlSet\Control\Power\PowerThrottling' 'PowerThrottlingOff' 1
+        fsutil behavior set disablelastaccess 1 2>$null | Out-Null
+        fsutil behavior set disable8dot3 1 2>$null | Out-Null
+        ''
+    }
+
+    Do-Opt 'telemetry' 'Privacy & telemetry (DiagTrack, Cortana, widgets, WER)' {
+        foreach ($s in 'DiagTrack','dmwappushservice','WerSvc') {
+            if (Get-Service -Name $s -ErrorAction SilentlyContinue) {
+                Stop-Service $s -Force -ErrorAction SilentlyContinue
+                Set-Service  $s -StartupType Disabled -ErrorAction SilentlyContinue
+            }
+        }
+        Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection' 'AllowTelemetry' 0
+        Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search' 'AllowCortana' 0
+        Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Dsh' 'AllowNewsAndInterests' 0
+        Set-Reg 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Feeds' 'ShellFeedsTaskbarViewMode' 2
+        ''
+    }
+
+    Do-Opt 'desktop' 'Desktop snappiness (menu delay, mouse accel off)' {
+        Set-Reg 'HKCU:\Control Panel\Desktop' 'MenuShowDelay' '0' 'String'
+        Set-Reg 'HKCU:\Control Panel\Desktop' 'AutoEndTasks' '1' 'String'
+        Set-Reg 'HKCU:\Control Panel\Desktop' 'WaitToKillAppTimeout' '2000' 'String'
+        Set-Reg 'HKLM:\SYSTEM\CurrentControlSet\Control' 'WaitToKillServiceTimeout' '2000' 'String'
+        Set-Reg 'HKCU:\Control Panel\Mouse' 'MouseSpeed' '0' 'String'
+        Set-Reg 'HKCU:\Control Panel\Mouse' 'MouseThreshold1' '0' 'String'
+        Set-Reg 'HKCU:\Control Panel\Mouse' 'MouseThreshold2' '0' 'String'
+        ''
+    }
+
     # Cleanup runs every time (temp regenerates) — not state-gated.
     $freed = 0
     foreach ($d in $env:TEMP, "$env:SystemRoot\Temp", "$env:SystemRoot\Prefetch") {
@@ -470,6 +524,62 @@ function Invoke-Optimizations {
     Write-Ok 'Clean Temp / Windows Temp / Prefetch' "(~$(HB $freed) freed)"
     Record 'Clean temporary files' 'Optimized' 0 "~$(HB $freed) freed"
     Write-LogFile "[OPT] cleanup freed ~$([int]$freed) bytes" 'Optimization'
+
+    # Persist the optimizations across reboots (vps-opti.bat + logon task).
+    Register-BootOptimizer
+}
+
+# Writes vps-opti.bat and registers a logon scheduled task ("VPS-Opti") that
+# re-applies the drift-prone tweaks (disabled services, key registry values,
+# power plan) elevated at every logon — so the box stays optimized even after a
+# Windows update or reboot re-enables something.
+function Register-BootOptimizer {
+    try {
+        $bat = Join-Path $Root 'vps-opti.bat'
+        $content = @'
+@echo off
+REM VPS-Opti - re-applies key optimizations at every logon.
+REM Generated + managed by the Roblox Server Deployment script. Safe to re-run.
+setlocal
+
+REM --- keep bloat / telemetry / Xbox services disabled ---
+for %%S in (SysMain WSearch DoSvc DiagTrack dmwappushservice WerSvc XblAuthManager XblGameSave XboxGipSvc XboxNetApiSvc) do (
+    sc config "%%S" start= disabled >nul 2>&1
+    sc stop "%%S" >nul 2>&1
+)
+
+REM --- latency / gaming / responsiveness ---
+reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile" /v NetworkThrottlingIndex /t REG_DWORD /d 4294967295 /f >nul 2>&1
+reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile" /v SystemResponsiveness /t REG_DWORD /d 0 /f >nul 2>&1
+reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games" /v "GPU Priority" /t REG_DWORD /d 8 /f >nul 2>&1
+reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games" /v "Priority" /t REG_DWORD /d 6 /f >nul 2>&1
+reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games" /v "Scheduling Category" /t REG_SZ /d High /f >nul 2>&1
+reg add "HKLM\SYSTEM\CurrentControlSet\Control\Power\PowerThrottling" /v PowerThrottlingOff /t REG_DWORD /d 1 /f >nul 2>&1
+reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows\GameDVR" /v AllowGameDVR /t REG_DWORD /d 0 /f >nul 2>&1
+reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows\DataCollection" /v AllowTelemetry /t REG_DWORD /d 0 /f >nul 2>&1
+reg add "HKCU\System\GameConfigStore" /v GameDVR_Enabled /t REG_DWORD /d 0 /f >nul 2>&1
+
+REM --- power: never sleep / hibernate / display-off ---
+powercfg -change -standby-timeout-ac 0 >nul 2>&1
+powercfg -change -monitor-timeout-ac 0 >nul 2>&1
+powercfg -change -hibernate-timeout-ac 0 >nul 2>&1
+powercfg -hibernate off >nul 2>&1
+
+endlocal
+'@
+        Set-Content -Path $bat -Value $content -Encoding ASCII -ErrorAction SilentlyContinue
+
+        # Logon task, highest privileges, so HKLM writes succeed unattended.
+        # Path has no spaces (ProgramData\RobloxDeploy) so no extra quoting needed.
+        schtasks /Create /TN 'VPS-Opti' /TR $bat /SC ONLOGON /RL HIGHEST /F 2>$null | Out-Null
+
+        Write-Ok 'Auto-apply optimizations at startup' '(task "VPS-Opti" + vps-opti.bat)'
+        Record 'Startup auto-optimizer' 'Optimized' 0 'VPS-Opti logon task'
+        Write-LogFile "[OPT] boot optimizer installed: $bat (scheduled task VPS-Opti)" 'Optimization'
+    } catch {
+        Write-Fail 'Auto-apply optimizations at startup' $_.Exception.Message
+        Record 'Startup auto-optimizer' 'Failed' 0 $_.Exception.Message
+    }
 }
 
 # ============================================================================
@@ -584,26 +694,74 @@ AutoclearReductByPhysical=$($Config.MemReduct.ThresholdPercent)
     } catch { Write-Info "Mem Reduct config partial: $($_.Exception.Message)" }
 }
 
+# Kills every Roblox-related process so the run stays unattended.
+function Stop-RobloxProcesses {
+    foreach ($n in 'RobloxPlayerBeta','RobloxPlayerLauncher','RobloxPlayerInstaller','RobloxCrashHandler','RobloxPlayerBeta_tmp','Roblox') {
+        taskkill /F /IM "$n.exe" /T 2>$null | Out-Null
+    }
+    Get-Process -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -like 'Roblox*' } |
+        Stop-Process -Force -ErrorAction SilentlyContinue
+}
+
+function Find-RobloxPlayer {
+    $ver = "$env:LOCALAPPDATA\Roblox\Versions"
+    if (-not (Test-Path $ver)) { return $null }
+    Get-ChildItem $ver -Recurse -Filter 'RobloxPlayerBeta.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
+}
+
 function Install-Roblox {
     $sw = [Diagnostics.Stopwatch]::StartNew()
-    $ver = "$env:LOCALAPPDATA\Roblox\Versions"
-    if ((Test-Path $ver) -and (Get-ChildItem $ver -Recurse -Filter 'RobloxPlayerBeta.exe' -ErrorAction SilentlyContinue)) {
+
+    # Already installed? Skip fast (detection is authoritative).
+    if (Find-RobloxPlayer) {
         $why = if (Test-Done 'sw.Roblox') { '(done in a previous run)' } else { '(already installed)' }
         Write-Skip 'Roblox' $why; Set-Step 'sw.Roblox' 'Done' 'present'; Record 'Roblox' 'Skipped' 0 'present'; return
     }
+
+    # Clean slate, then download + run the bootstrapper (it installs itself).
+    Stop-RobloxProcesses
     $boot = Join-Path $Dl 'RobloxPlayerInstaller.exe'
     if (-not (Get-File -Url 'https://www.roblox.com/download/client?os=win' -Dest $boot -Label 'Roblox')) {
         Write-Fail 'Roblox' 'download failed'; Set-Step 'sw.Roblox' 'Failed' 'download'; Record 'Roblox' 'Failed' $sw.Elapsed.TotalSeconds; return
     }
-    Start-Process $boot -WindowStyle Hidden -ErrorAction SilentlyContinue
-    $ok = $false
+    Start-Process $boot -ErrorAction SilentlyContinue
+
+    # Wait (bounded) for the player to be installed, with a live heartbeat so it
+    # never looks frozen.
+    $player = $null
     for ($i = 0; $i -lt 60; $i++) {
+        $player = Find-RobloxPlayer
+        if ($player) { break }
+        Write-Host ("`r   ⏳ Installing Roblox… {0,3}s   " -f ($i * 3)) -NoNewline -ForegroundColor DarkCyan
         Start-Sleep -Seconds 3
-        if ((Test-Path $ver) -and (Get-ChildItem $ver -Recurse -Filter 'RobloxPlayerBeta.exe' -ErrorAction SilentlyContinue)) { $ok = $true; break }
     }
-    Get-Process RobloxPlayerBeta, RobloxPlayerLauncher, Roblox -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-    if ($ok) { Write-Ok 'Roblox' ("({0:N0}s)" -f $sw.Elapsed.TotalSeconds); Set-Step 'sw.Roblox' 'Done' 'installed'; Record 'Roblox' 'Installed' $sw.Elapsed.TotalSeconds }
-    else     { Write-Fail 'Roblox' 'player not detected after install'; Set-Step 'sw.Roblox' 'Failed' 'timeout'; Record 'Roblox' 'Failed' $sw.Elapsed.TotalSeconds }
+    Write-Host ("`r" + (' ' * 40) + "`r") -NoNewline
+
+    if (-not $player) {
+        Stop-RobloxProcesses
+        Write-Fail 'Roblox' 'player not installed (bootstrapper did not finish)'
+        Set-Step 'sw.Roblox' 'Failed' 'noplayer'; Record 'Roblox' 'Failed' $sw.Elapsed.TotalSeconds; return
+    }
+
+    # Open it to be sure it's alive, confirm the process, then taskkill and move on.
+    $alive = $false
+    try {
+        if (-not (Get-Process RobloxPlayerBeta -ErrorAction SilentlyContinue)) {
+            Start-Process $player.FullName -ErrorAction SilentlyContinue
+        }
+        for ($i = 0; $i -lt 24; $i++) {   # up to ~12s to confirm it launched
+            if (Get-Process RobloxPlayerBeta -ErrorAction SilentlyContinue) { $alive = $true; break }
+            Start-Sleep -Milliseconds 500
+        }
+    } catch { }
+
+    Stop-RobloxProcesses   # always kill so the deployment stays unattended
+
+    $note = if ($alive) { 'verified alive' } else { 'installed' }
+    Write-Ok 'Roblox' ("($note, {0:N0}s)" -f $sw.Elapsed.TotalSeconds)
+    Set-Step 'sw.Roblox' 'Done' $note
+    Record 'Roblox' 'Installed' $sw.Elapsed.TotalSeconds
 }
 
 function Install-RAM {
