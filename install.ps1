@@ -59,6 +59,7 @@ $Config = [ordered]@{
     CleanupOnFinish = $true
     Features = [ordered]@{
         OptimizeWindows            = $true
+        UpdateDrivers              = $true   # detect hardware + install latest drivers via Windows Update
         InstallWinRAR              = $true
         InstallVisualCpp           = $true
         InstallDotNet              = $true
@@ -378,6 +379,87 @@ function Install-Item {
 # Makes the run reversible: exports the registry subtrees this script modifies,
 # and (once per machine) creates a System Restore point. On Tiny10 System Restore
 # is often stripped, so the .reg exports are the primary rollback path.
+function Get-VendorDriverUrl($name) {
+    switch -Regex ($name) {
+        'NVIDIA|GeForce|Quadro|RTX|GTX' { 'https://www.nvidia.com/Download/index.aspx' }
+        'AMD|Radeon'                    { 'https://www.amd.com/en/support' }
+        'Intel'                         { 'https://www.intel.com/content/www/us/en/download-center/home.html' }
+        default                         { $null }
+    }
+}
+
+# Installs applicable driver updates from Windows Update via the WU COM API.
+# Returns count installed, or -1 when WU is unavailable (often stripped on Tiny10).
+function Update-DriversViaWindowsUpdate {
+    try {
+        $session  = New-Object -ComObject Microsoft.Update.Session
+        $searcher = $session.CreateUpdateSearcher()
+        $res = $searcher.Search("IsInstalled=0 and Type='Driver' and IsHidden=0")
+        if ($res.Updates.Count -eq 0) { return 0 }
+
+        $toGet = New-Object -ComObject Microsoft.Update.UpdateColl
+        foreach ($u in $res.Updates) { [void]$toGet.Add($u) }
+        $dl = $session.CreateUpdateDownloader(); $dl.Updates = $toGet; [void]$dl.Download()
+
+        $toInstall = New-Object -ComObject Microsoft.Update.UpdateColl
+        foreach ($u in $res.Updates) { if ($u.IsDownloaded) { [void]$toInstall.Add($u) } }
+        if ($toInstall.Count -eq 0) { return 0 }
+
+        $installer = $session.CreateUpdateInstaller(); $installer.Updates = $toInstall
+        [void]$installer.Install()
+        return $toInstall.Count
+    } catch {
+        Write-LogFile "[WARN] Windows Update driver path unavailable: $($_.Exception.Message)" 'Software'
+        return -1
+    }
+}
+
+# Detects hardware, flags devices missing drivers, and installs the latest drivers
+# via Windows Update. VM-aware (skips desktop-GPU advice on a hypervisor).
+function Invoke-Drivers {
+    Write-Section 'Hardware detection & drivers'
+    $gpus = @(); $isVM = $false
+    try {
+        $cpu   = ((Get-CimInstance Win32_Processor -ErrorAction SilentlyContinue | Select-Object -First 1).Name).Trim()
+        $gpus  = @(Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue | Select-Object -Expand Name)
+        $cs    = Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue
+        $board = Get-CimInstance Win32_BaseBoard -ErrorAction SilentlyContinue
+        $ramGb = if ($cs) { [math]::Round($cs.TotalPhysicalMemory / 1GB, 1) } else { 0 }
+        $isVM  = ("$($cs.Model) $($cs.Manufacturer)") -match 'Virtual|VMware|VirtualBox|KVM|QEMU|Xen|Hyper-V|Bochs|Parallels'
+
+        Write-Info ("CPU  : {0}" -f $cpu)
+        Write-Info ("GPU  : {0}" -f (($gpus | Where-Object { $_ }) -join ', '))
+        Write-Info ("RAM  : {0} GB    Board: {1} {2}" -f $ramGb, $board.Manufacturer, $board.Product)
+        Write-Info ("Type : {0}" -f $(if ($isVM) { 'Virtual machine (GPU drivers are usually hypervisor guest tools)' } else { 'Physical machine' }))
+    } catch { Write-LogFile "[WARN] hardware inventory: $($_.Exception.Message)" 'Software' }
+
+    # Devices with a driver problem (ConfigManagerErrorCode != 0).
+    try {
+        $bad = @(Get-CimInstance Win32_PnPEntity -ErrorAction SilentlyContinue |
+                 Where-Object { $_.ConfigManagerErrorCode -and $_.ConfigManagerErrorCode -ne 0 })
+        if ($bad.Count) {
+            Write-Skip 'Devices needing a driver' "($($bad.Count) found)"
+            foreach ($d in ($bad | Select-Object -First 8)) { Write-Host ("     • {0}" -f $d.Name) -ForegroundColor Yellow }
+        } else {
+            Write-Ok 'Driver status' 'all present devices have drivers'
+        }
+    } catch { }
+
+    # Install latest drivers via Windows Update (all vendors, signed).
+    $n = Update-DriversViaWindowsUpdate
+    if     ($n -gt 0) { Write-Ok   'Latest drivers via Windows Update' "($n installed — reboot may apply them)"; Record 'Driver update' 'Optimized' 0 "$n via WU" }
+    elseif ($n -eq 0) { Write-Ok   'Latest drivers via Windows Update' 'already up to date'; Record 'Driver update' 'Optimized' 0 'up to date' }
+    else              { Write-Skip 'Latest drivers via Windows Update' '(WU unavailable on this OS)'; Record 'Driver update' 'Skipped' 0 'no WU' }
+
+    # GPU vendor: point at the official latest-driver page (WU can lag on GPUs).
+    if (-not $isVM) {
+        foreach ($g in $gpus) {
+            $u = Get-VendorDriverUrl $g
+            if ($u) { Write-Info ("Newest {0} driver (if WU lags): {1}" -f (($g -split ' ')[0]), $u) }
+        }
+    }
+}
+
 function New-SafetyBackup {
     Write-Section 'Safety backup (reversibility)'
     $backupDir = Join-Path $Root 'backup'
@@ -975,6 +1057,7 @@ try {
     New-SafetyBackup          # restore point + registry export BEFORE any changes
     Invoke-Optimizations
     Invoke-Software
+    if ($Config.Features.UpdateDrivers) { Invoke-Drivers } else { Write-Info 'Driver update disabled by config.' }
     Write-Summary
 }
 catch {

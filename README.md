@@ -88,6 +88,15 @@ Mem Reduct here (smarter + Roblox-aware); set `InstallMemReduct = $true` in
 `$Config` if you want the generic RAM cleaner too. Loafy is built fresh from
 `C:\Users\loaf\loafy` (Native AOT) for each release.
 
+**Hardware & drivers** — detects CPU / GPU(s) / board / RAM, flags any device
+missing a driver (`ConfigManagerErrorCode`), and installs the latest **signed**
+drivers via Windows Update (covers GPU/NIC/chipset). VM-aware: on a hypervisor it
+skips desktop-GPU advice (those are guest tools). When Windows Update lags on GPU
+drivers it prints the vendor's official download page. Toggle with `UpdateDrivers`.
+Per-vendor "latest GPU driver" scrapers are intentionally **not** embedded (they
+break constantly); ask if your box is bare-metal NVIDIA and a scripted install can
+be added.
+
 **Every action is logged** to `C:\ProgramData\RobloxDeploy\logs\`:
 `install.log`, `errors.log`, `downloads.log`, `optimization.log`, `software.log`.
 
