@@ -54,11 +54,20 @@ power management off; applies background-services scheduling, best-performance
 visual effects and Explorer tweaks (show extensions/hidden files, open This PC, no
 recent/frequent); cleans Temp, Windows Temp and Prefetch.
 
-**loafy-optimizer core** (extra latency/gaming tuning) — network throttling off +
-Nagle disabled for lower latency, gaming GPU/CPU task priorities, prefetch/superfetch
-off, NTFS last-access + 8.3 names off, CPU power-throttling off, telemetry off
-(DiagTrack / Cortana / Widgets / Error Reporting), zero menu-show delay and mouse
-acceleration off. All of it re-applies **every run** (it's cheap and idempotent).
+**loafy-optimizer core** — ported from the **Loafy Optimizer** "Esports" profile
+(SAFE + MODERATE tweaks): `NetworkThrottlingIndex` off, Nagle off + TCP autotune,
+`SystemResponsiveness=10`, global timer-resolution request, MMCSS **Games** task
+priorities + **Game Mode** on, `TdrDelay`, CPU power-throttling off + core unpark +
+aggressive boost, prefetch/superfetch/large-cache/clear-pagefile off, TRIM on +
+NTFS last-access & 8.3 off, telemetry to Basic + Cortana/Widgets off and the
+esports service set disabled (DiagTrack, dmwappushservice, WER, Fax, RemoteRegistry,
+WMPNetworkSvc, MapsBroker), `MenuShowDelay=50`, faster kill-timeouts and mouse
+acceleration off. Re-applies **every run** (cheap + idempotent).
+
+> One deliberate deviation from the esports profile: processor scheduling stays on
+> **Background Services** (`Win32PrioritySeparation=24`) instead of the profile's
+> foreground `0x26`, because Roblox Account Manager runs **many** instances rather
+> than one foreground game — background scheduling shares CPU better across them.
 
 **Stays optimized after reboots** — writes `vps-opti.bat` and registers a
 highest-privilege **logon scheduled task `VPS-Opti`** that re-asserts the

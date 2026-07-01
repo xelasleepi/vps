@@ -456,57 +456,80 @@ function Invoke-Optimizations {
         ''
     }
 
-    # ---- loafy-optimizer core: curated latency / gaming / responsiveness ----
-    Do-Opt 'netlatency' 'Network latency & responsiveness (throttling, Nagle off)' {
-        Set-Reg 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile' 'NetworkThrottlingIndex' 0xffffffff
-        Set-Reg 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile' 'SystemResponsiveness' 0
-        $ifs = 'HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces'
-        Get-ChildItem $ifs -ErrorAction SilentlyContinue | ForEach-Object {
+    # ---- loafy-optimizer core (ported from the user's "Loafy Optimizer",
+    #      esports profile — SAFE + MODERATE tweaks only) ----------------------
+    Do-Opt 'netlatency' 'Latency & responsiveness (throttling off, Nagle off, timer res)' {
+        $sp = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile'
+        Set-Reg $sp 'NetworkThrottlingIndex' 0xffffffff
+        Set-Reg $sp 'SystemResponsiveness' 10                              # Loafy reg.sysresp (10, not 0)
+        Set-Reg 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\kernel' 'GlobalTimerResolutionRequests' 1  # lat.global-timer-res
+        # Nagle off on every TCP interface (net.nagle-off)
+        Get-ChildItem 'HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces' -ErrorAction SilentlyContinue | ForEach-Object {
             Set-Reg $_.PSPath 'TcpAckFrequency' 1
             Set-Reg $_.PSPath 'TCPNoDelay' 1
         }
+        ipconfig /flushdns 2>$null | Out-Null                             # net.flush-dns
+        netsh int tcp set global autotuninglevel=normal 2>$null | Out-Null # net.tcp-tuned
+        netsh int tcp set global rss=enabled 2>$null | Out-Null
         ''
     }
 
-    Do-Opt 'gaming' 'Gaming task priorities (GPU/CPU scheduling)' {
-        $g = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games'
+    Do-Opt 'gaming' 'Gaming (MMCSS Games priorities, Game Mode on, TDR)' {
+        $g = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games'  # reg.mmcss-games
         Set-Reg $g 'GPU Priority' 8
         Set-Reg $g 'Priority' 6
         Set-Reg $g 'Scheduling Category' 'High' 'String'
         Set-Reg $g 'SFIO Priority' 'High' 'String'
+        Set-Reg 'HKCU:\Software\Microsoft\GameBar' 'AllowAutoGameMode' 1   # game.mode-on
+        Set-Reg 'HKCU:\Software\Microsoft\GameBar' 'AutoGameModeEnabled' 1
+        Set-Reg 'HKLM:\SOFTWARE\Microsoft\PolicyManager\default\ApplicationManagement\AllowGameDVR' 'value' 0  # reg.gamedvr
+        Set-Reg 'HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers' 'TdrDelay' 10   # gpu.tdr-extend
         ''
     }
 
-    Do-Opt 'storagemem' 'Storage & memory (prefetch off, NTFS, power throttling off)' {
-        $mm = 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management\PrefetchParameters'
-        Set-Reg $mm 'EnablePrefetcher' 0
-        Set-Reg $mm 'EnableSuperfetch' 0
-        Set-Reg 'HKLM:\SYSTEM\CurrentControlSet\Control\Power\PowerThrottling' 'PowerThrottlingOff' 1
-        fsutil behavior set disablelastaccess 1 2>$null | Out-Null
-        fsutil behavior set disable8dot3 1 2>$null | Out-Null
+    Do-Opt 'cpumem' 'CPU & memory (no throttle, unpark, boost, caches off)' {
+        Set-Reg 'HKLM:\SYSTEM\CurrentControlSet\Control\Power\PowerThrottling' 'PowerThrottlingOff' 1   # cpu.no-throttle
+        # No core parking + aggressive boost (cpu.no-park / cpu.boost-aggressive)
+        powercfg -setacvalueindex SCHEME_CURRENT SUB_PROCESSOR 0cc5b647-c1df-4637-891a-dec35c318583 100 2>$null | Out-Null
+        powercfg -setacvalueindex SCHEME_CURRENT SUB_PROCESSOR be337238-0d82-4146-a960-4f3749d470c7 2 2>$null | Out-Null
+        powercfg -setactive SCHEME_CURRENT 2>$null | Out-Null
+        $mm = 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management'
+        Set-Reg "$mm\PrefetchParameters" 'EnablePrefetcher' 0
+        Set-Reg "$mm\PrefetchParameters" 'EnableSuperfetch' 0
+        Set-Reg $mm 'LargeSystemCache' 0                                   # ram.large-system-cache-off
+        Set-Reg $mm 'ClearPageFileAtShutdown' 0                            # ram.clear-pf-shutdown-off
         ''
     }
 
-    Do-Opt 'telemetry' 'Privacy & telemetry (DiagTrack, Cortana, widgets, WER)' {
-        foreach ($s in 'DiagTrack','dmwappushservice','WerSvc') {
+    Do-Opt 'storage' 'Storage (TRIM on, NTFS last-access & 8.3 off)' {
+        fsutil behavior set DisableDeleteNotify 0 2>$null | Out-Null       # stor.trim-on
+        fsutil behavior set disablelastaccess 1 2>$null | Out-Null         # stor.lastaccess-off
+        fsutil behavior set disable8dot3 1 2>$null | Out-Null              # stor.8dot3-off
+        ''
+    }
+
+    Do-Opt 'telemetry' 'Privacy & telemetry (services, telemetry basic, Cortana, widgets)' {
+        # svc.* — safe-to-disable services from the esports profile
+        foreach ($s in 'DiagTrack','dmwappushservice','WerSvc','Fax','RemoteRegistry','WMPNetworkSvc','MapsBroker') {
             if (Get-Service -Name $s -ErrorAction SilentlyContinue) {
                 Stop-Service $s -Force -ErrorAction SilentlyContinue
                 Set-Service  $s -StartupType Disabled -ErrorAction SilentlyContinue
             }
         }
-        Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection' 'AllowTelemetry' 0
+        Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection' 'AllowTelemetry' 1  # tel.dt-min (1=Basic, safe)
         Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search' 'AllowCortana' 0
         Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Dsh' 'AllowNewsAndInterests' 0
         Set-Reg 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Feeds' 'ShellFeedsTaskbarViewMode' 2
         ''
     }
 
-    Do-Opt 'desktop' 'Desktop snappiness (menu delay, mouse accel off)' {
-        Set-Reg 'HKCU:\Control Panel\Desktop' 'MenuShowDelay' '0' 'String'
+    Do-Opt 'desktop' 'Desktop snappiness (menu 50ms, kill timeouts, mouse accel off)' {
+        Set-Reg 'HKCU:\Control Panel\Desktop' 'MenuShowDelay' '50' 'String'          # reg.menu-delay (50)
+        Set-Reg 'HKCU:\Control Panel\Desktop' 'WaitToKillAppTimeout' '5000' 'String' # reg.wait-to-kill
+        Set-Reg 'HKCU:\Control Panel\Desktop' 'HungAppTimeout' '2000' 'String'
         Set-Reg 'HKCU:\Control Panel\Desktop' 'AutoEndTasks' '1' 'String'
-        Set-Reg 'HKCU:\Control Panel\Desktop' 'WaitToKillAppTimeout' '2000' 'String'
-        Set-Reg 'HKLM:\SYSTEM\CurrentControlSet\Control' 'WaitToKillServiceTimeout' '2000' 'String'
-        Set-Reg 'HKCU:\Control Panel\Mouse' 'MouseSpeed' '0' 'String'
+        Set-Reg 'HKLM:\SYSTEM\CurrentControlSet\Control' 'WaitToKillServiceTimeout' '2000' 'String'  # reg.kill-service
+        Set-Reg 'HKCU:\Control Panel\Mouse' 'MouseSpeed' '0' 'String'                # reg.mouse-accel
         Set-Reg 'HKCU:\Control Panel\Mouse' 'MouseThreshold1' '0' 'String'
         Set-Reg 'HKCU:\Control Panel\Mouse' 'MouseThreshold2' '0' 'String'
         ''
@@ -543,21 +566,26 @@ REM Generated + managed by the Roblox Server Deployment script. Safe to re-run.
 setlocal
 
 REM --- keep bloat / telemetry / Xbox services disabled ---
-for %%S in (SysMain WSearch DoSvc DiagTrack dmwappushservice WerSvc XblAuthManager XblGameSave XboxGipSvc XboxNetApiSvc) do (
+for %%S in (SysMain WSearch DoSvc DiagTrack dmwappushservice WerSvc Fax RemoteRegistry WMPNetworkSvc MapsBroker XblAuthManager XblGameSave XboxGipSvc XboxNetApiSvc) do (
     sc config "%%S" start= disabled >nul 2>&1
     sc stop "%%S" >nul 2>&1
 )
 
-REM --- latency / gaming / responsiveness ---
+REM --- latency / gaming / responsiveness (Loafy esports values) ---
 reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile" /v NetworkThrottlingIndex /t REG_DWORD /d 4294967295 /f >nul 2>&1
-reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile" /v SystemResponsiveness /t REG_DWORD /d 0 /f >nul 2>&1
+reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile" /v SystemResponsiveness /t REG_DWORD /d 10 /f >nul 2>&1
+reg add "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\kernel" /v GlobalTimerResolutionRequests /t REG_DWORD /d 1 /f >nul 2>&1
 reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games" /v "GPU Priority" /t REG_DWORD /d 8 /f >nul 2>&1
 reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games" /v "Priority" /t REG_DWORD /d 6 /f >nul 2>&1
 reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games" /v "Scheduling Category" /t REG_SZ /d High /f >nul 2>&1
 reg add "HKLM\SYSTEM\CurrentControlSet\Control\Power\PowerThrottling" /v PowerThrottlingOff /t REG_DWORD /d 1 /f >nul 2>&1
-reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows\GameDVR" /v AllowGameDVR /t REG_DWORD /d 0 /f >nul 2>&1
-reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows\DataCollection" /v AllowTelemetry /t REG_DWORD /d 0 /f >nul 2>&1
+reg add "HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" /v TdrDelay /t REG_DWORD /d 10 /f >nul 2>&1
+reg add "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management" /v LargeSystemCache /t REG_DWORD /d 0 /f >nul 2>&1
+reg add "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management" /v ClearPageFileAtShutdown /t REG_DWORD /d 0 /f >nul 2>&1
+reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows\DataCollection" /v AllowTelemetry /t REG_DWORD /d 1 /f >nul 2>&1
 reg add "HKCU\System\GameConfigStore" /v GameDVR_Enabled /t REG_DWORD /d 0 /f >nul 2>&1
+reg add "HKCU\Software\Microsoft\GameBar" /v AllowAutoGameMode /t REG_DWORD /d 1 /f >nul 2>&1
+reg add "HKCU\Software\Microsoft\GameBar" /v AutoGameModeEnabled /t REG_DWORD /d 1 /f >nul 2>&1
 
 REM --- power: never sleep / hibernate / display-off ---
 powercfg -change -standby-timeout-ac 0 >nul 2>&1
