@@ -73,7 +73,11 @@ public static class WindowEffects
         // Each attribute is independent; failure of one must not block the others.
         TrySetAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, 1);
         TrySetAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND);
-        TrySetAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, DWMSBT_MAINWINDOW);
+
+        // NOTE: The Mica system backdrop (DWMWA_SYSTEMBACKDROP_TYPE) is deliberately
+        // NOT applied. It requires DWM composition that stripped builds (Tiny10) and
+        // many VMs lack, where it renders the window pitch black. The window keeps a
+        // solid dark background instead, which looks correct everywhere.
     }
 
     private static void TrySetAttribute(IntPtr hwnd, int attribute, int value)

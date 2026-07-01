@@ -23,6 +23,13 @@ public partial class App : Application
     {
         base.OnStartup(e);
 
+        // Tiny10 and virtual machines frequently ship without working GPU
+        // acceleration, which makes WPF paint a pitch-black window. Force software
+        // rendering so the UI renders reliably everywhere (this is a lightweight,
+        // one-shot deployment console, so the cost is irrelevant).
+        System.Windows.Media.RenderOptions.ProcessRenderMode =
+            System.Windows.Interop.RenderMode.SoftwareOnly;
+
         // Global safety nets — this tool must never surface an unhandled crash.
         DispatcherUnhandledException += OnDispatcherUnhandledException;
         AppDomain.CurrentDomain.UnhandledException += OnDomainUnhandledException;

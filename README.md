@@ -1,240 +1,118 @@
-# Setup.exe — Roblox Server Deployment Tool
+# Roblox Server Deployment
 
-A professional, **one-click, fully unattended** Windows deployment application for a
-dedicated **Tiny10 x64 23H2** machine. It optimizes Windows for performance,
-silently installs a curated software stack, logs every action, and reports a full
-summary at the end — all behind a premium **terminal-style** WPF interface.
+A **one-line, fully unattended** Windows provisioning tool for a dedicated
+**Tiny10 x64 23H2** machine. It runs **natively in PowerShell** — no GUI, no
+installer to click, no .NET required — self-elevates, then silently optimizes
+Windows and installs the software stack with a clean, colored terminal UI and
+full logging. Idempotent and safe to re-run.
 
-> Built with **C# / .NET 8 / WPF**. Ships as a single `Setup.exe` that requires
-> Administrator elevation and performs the entire deployment with **no user
-> interaction** (the UAC prompt is the only pre-run step).
+## Install (one-liner)
 
-## Screenshots
-
-Live deployment console:
-
-![Deployment console](docs/ui-running.png)
-
-Final summary screen:
-
-![Summary](docs/ui-summary.png)
-
-> These are actual frames rendered from the compiled `MainWindow` (not mockups).
-
----
-
-## Quick install (one-liner)
-
-On the target machine, open **PowerShell** and run:
+Open **PowerShell** and run:
 
 ```powershell
 irm https://raw.githubusercontent.com/xelasleepi/vps/main/install.ps1 | iex
 ```
 
-This downloads the latest **self-contained** `Setup.exe` (no .NET install required)
-from the GitHub release and launches it elevated — approve the single UAC prompt
-and the deployment runs unattended. Edit [`config.json`](src/Setup/config.json)
-in the release, or drop your own `config.json` next to the exe, to change toggles.
+That's it. If you're not already elevated, it raises a UAC prompt and continues
+in an admin window; everything after that is automatic. What you'll see:
 
----
+```
+  ╔════════════════════════════════════════════════════╗
+  ║            Roblox Server Deployment                ║
+  ╚════════════════════════════════════════════════════╝
+   Tiny10 x64 · unattended · silent
 
-## Highlights
+  ── Optimizing Windows ────────────────────────────
+   ✔ Disable background services           (5 of 7 present)
+   ✔ Power plan → Ultimate Performance (never sleep/hibernate)
+   ✔ Clean Temp / Windows Temp / Prefetch  (~412.7 MB freed)
 
-- **Terminal-style UI** — dark theme, monospace, Mica backdrop, rounded corners,
-  live colored log, progress bar, elapsed/ETA, download speed, step checklist.
-- **Silent & idempotent** — safe to run repeatedly; already-installed software is
-  detected and skipped; no installer windows, no prompts, no message boxes
-  (only the in-app final summary).
-- **Resilient** — every operation reports `SUCCESS` / `FAILED` / `SKIPPED` with
-  elapsed time; failures never abort the run, they are collected and reported.
-- **Reusable download manager** — HTTPS, resume, retry (3×), SHA-256 verification,
-  progress + speed, per-attempt timeouts.
-- **Config-driven** — `config.json` controls features, URLs, silent switches and
-  hashes without recompiling.
-- **Comprehensive logging** — `install.log`, `errors.log`, `downloads.log`,
-  `optimization.log`, `software.log`, all timestamped.
+  ── Installing Software ───────────────────────────
+   ⏬ WinRAR                     3.8 MB   downloaded
+   ✔ WinRAR                                (3.2s)
+   ↷ Edge WebView2 Runtime                 (already installed)
+   ✔ Roblox                                (58s)
 
----
+  ╔════════════════════════════════════════════════════╗
+  ║  Deployment Complete                               ║
+  ╚════════════════════════════════════════════════════╝
+   Installed 8   ·   Skipped 2   ·   Failed 0
+   Elapsed   00:02:37
+   Logs      C:\ProgramData\RobloxDeploy\logs
+```
+
+Colors: green = success, yellow = skipped, red = failed, cyan = downloads.
 
 ## What it does
 
-### Windows optimization (`OptimizeWindows`)
-Disables/adjusts: SysMain, Windows Search indexing, Delivery Optimization, Xbox
-services, Xbox Game Bar, Game DVR, Hibernation, Fast Startup, Background Apps,
-Consumer Experience, Windows Tips, Suggested Apps, Lock-screen suggestions,
-Scheduled Maintenance, Scheduled Defrag, Startup Delay, Transparency, Visual
-Effects, Automatic App Updates, Notification suggestions.
+**Optimizes Windows** — disables SysMain, Windows Search, Delivery Optimization,
+Xbox services, Game Bar / Game DVR, Consumer Experience & suggestions, background
+apps, automatic Store updates, hibernation, Fast Startup, scheduled maintenance &
+defrag; sets the Ultimate/High-Performance power plan with never-sleep and USB/PCIe
+power management off; applies background-services scheduling, best-performance
+visual effects and Explorer tweaks (show extensions/hidden files, open This PC, no
+recent/frequent); cleans Temp, Windows Temp and Prefetch.
 
-Configures: Ultimate Performance power plan (falls back to High Performance),
-never sleep/hibernate/display-off, processor scheduling = background services,
-USB selective suspend off, PCIe ASPM off.
+**Installs software** (detect → skip if present → silent install → verify):
+WinRAR · Visual C++ Redistributables 2005–2022 (x86 + x64) · .NET Framework 4.8 ·
+.NET Desktop Runtime 8 · Edge WebView2 · DirectX June 2010 runtime · **Mem Reduct**
+(configured to autostart minimized to tray with auto-clean) · **Roblox** ·
+**Roblox Account Manager**.
 
-Explorer: show file extensions, show hidden files, open **This PC**, disable
-recent files & frequent folders.
+**Every action is logged** to `C:\ProgramData\RobloxDeploy\logs\`:
+`install.log`, `errors.log`, `downloads.log`, `optimization.log`, `software.log`.
 
-Cleans: user Temp, Windows Temp, Prefetch, Windows Update cache (when appropriate).
+## Reliability
 
-### Software installation
-| Software | Detection → skip if present | Source |
-|---|---|---|
-| WinRAR | `WinRAR.exe` / uninstall key | rarlab.com |
-| Visual C++ Redistributables (2005–2022, x86 + x64) | registry / uninstall keys | Microsoft (aka.ms + download.microsoft.com) |
-| .NET Framework 4.8 | `NDP\v4\Full` Release ≥ 528040 | Microsoft |
-| .NET Desktop Runtime 8 | `dotnet --list-runtimes` / shared folder | Microsoft |
-| Edge WebView2 Runtime | EdgeUpdate client `pv` | Microsoft (evergreen) |
-| DirectX End-User Runtime (June 2010) | `d3dx9_43.dll` present | Microsoft |
-| Mem Reduct | install path / uninstall key | github.com/henrypp |
-| Roblox | `RobloxPlayerBeta.exe` under LocalAppData | roblox.com |
-| Roblox Account Manager | extracted exe present | github.com/ic3w0lf22 |
+- **Download manager** — HTTPS with redirect, 3× retry with backoff, inline
+  progress + speed, optional SHA-256 verification.
+- **Resilient** — every step reports `SUCCESS` / `SKIPPED` / `FAILED` with elapsed
+  time; a failure never aborts the run, it's collected and shown in the summary.
+- **Idempotent** — re-running skips anything already installed/applied.
 
-**Mem Reduct** is additionally configured after install: launch with Windows,
-start minimized to tray, automatic memory cleanup with sensible thresholds
-(see `memReductSettings` in `config.json`).
+## Configuration
 
----
-
-## Requirements
-
-- **Windows 10/11 x64** (target: Tiny10 x64 23H2).
-- **.NET 8 Desktop Runtime** to run, **.NET 8 SDK** to build.
-  (Ironically the tool can install the runtime itself; to bootstrap on a bare
-  machine, publish self-contained — see below.)
-- **Administrator** privileges (enforced by the embedded manifest).
-- Internet access for downloads.
-
----
-
-## Build
+Defaults are embedded in [`install.ps1`](install.ps1) under `$Config` — flip any
+feature off, change the Mem Reduct thresholds, or set `AutoReboot = $true`:
 
 ```powershell
-# From the repository root
-dotnet restore RobloxDeploy.sln
-dotnet build   RobloxDeploy.sln -c Release
-```
-
-Output: `src/Setup/bin/Release/net8.0-windows/win-x64/Setup.exe`.
-
-### Publish a portable, framework-dependent Setup.exe
-```powershell
-dotnet publish src/Setup/Setup.csproj -c Release -r win-x64 --self-contained false -o publish
-```
-
-### Publish a single self-contained Setup.exe (runs on a machine with no .NET)
-```powershell
-dotnet publish src/Setup/Setup.csproj -c Release -r win-x64 `
-  --self-contained true -p:PublishSingleFile=true -o publish
-```
-
-Copy `config.json` next to the published `Setup.exe` (the build copies it to the
-output folder automatically).
-
----
-
-## Run
-
-Right-click **Setup.exe → Run as administrator** (or just double-click — the
-manifest triggers the UAC prompt). Everything after that is automatic.
-
-Working folders are created next to the executable under `SetupDeploy\`:
-
-```
-SetupDeploy\
-  downloads\   installer payloads
-  logs\        install.log, errors.log, downloads.log, optimization.log, software.log
-  temp\        scratch (DirectX payload, extracted archives)
-```
-
-Set `"workingDirectory"` in `config.json` to relocate them.
-
----
-
-## Configuration (`config.json`)
-
-Top-level toggles:
-
-```jsonc
-{
-  "autoReboot": false,          // reboot 30s after completion
-  "cleanupOnFinish": true,      // wipe downloads/temp at the end
-  "continueOnError": true,
-  "features": {
-    "installWinRAR": true,
-    "installVisualCpp": true,
-    "installDotNet": true,
-    "installWebView2": true,
-    "installDirectX": true,
-    "installMemReduct": true,
-    "installRoblox": true,
-    "installRobloxAccountManager": true,
-    "optimizeWindows": true,
-    "autoReboot": false
-  },
-  "downloads": { "maxRetries": 3, "timeoutSeconds": 900, "resumeIfPossible": true }
+$Config = @{
+    AutoReboot      = $false
+    CleanupOnFinish = $true
+    Features = @{
+        OptimizeWindows = $true
+        InstallWinRAR   = $true
+        InstallVisualCpp = $true
+        InstallDotNet   = $true
+        InstallWebView2 = $true
+        InstallDirectX  = $true
+        InstallMemReduct = $true
+        InstallRoblox   = $true
+        InstallRobloxAccountManager = $true
+    }
 }
 ```
 
-- Each entry under `software` has a `url`, optional `wingetId` (fallback),
-  optional `sha256` (leave **empty** to skip verification — required for
-  "evergreen" always-latest links whose bytes change over time),
-  `installerFileName`, and `silentArgs`.
-- To pin a version for reproducibility, set both a fixed `url` **and** its `sha256`.
+To customize the hosted one-liner, edit `install.ps1` and push — the raw URL always
+serves `main`.
+
+## Notes
+
+- Runs elevated (required to change services / power / registry and install
+  software). The single UAC prompt is the only interaction.
+- **Roblox** installs per-user into the elevated account's profile; the script
+  waits for `RobloxPlayerBeta.exe` then closes the auto-launched client.
+- Services already removed by Tiny10 report **SKIPPED**, not failed.
+- Evergreen download URLs (VC++ `aka.ms`, WebView2) ship without pinned hashes
+  since their bytes change; add a `-Sha256` to `Install-Item` calls to pin.
 
 ---
 
-## Architecture
+### Also in this repo: a C# / WPF edition
 
-Single WPF project (`src/Setup/Setup.csproj`, `AssemblyName=Setup`) organized as:
-
-```
-src/Setup/
-  App.xaml / App.xaml.cs            composition root: config → logging → engine → UI
-  MainWindow.xaml / .cs             terminal-style console window
-  config.json                       deployment configuration
-  app.manifest                      requireAdministrator + DPI + long paths
-  Themes/                           Colors.xaml, Styles.xaml
-  UI/
-    ViewModels/                     MainViewModel (IProgressReporter), TerminalLine, TrackedItem
-    Interop/WindowEffects.cs        Mica / dark title bar / rounded corners
-    Converters/
-  Core/
-    Models/                         enums, results, config, download models
-    Abstractions/                   ILogger, IDownloadManager, IProcessRunner,
-                                    IProgressReporter, IInstaller, IOptimizationTask
-    Services/                       Logger, DownloadManager, ProcessRunner
-    Utils/                          AdminHelper, RegistryHelper, FileSystemUtil
-    Installers/                     one class per package + InstallerCatalog
-    Optimization/                   grouped tweak tasks + OptimizationCatalog
-    Deployment/                     DeploymentContext, DeploymentEngine
-```
-
-**Flow:** `App` loads `config.json`, creates the working dirs + `Logger`, builds
-the `DownloadManager` / `ProcessRunner`, creates the `MainViewModel` (which is the
-UI's `IProgressReporter`), then runs `DeploymentEngine`. The engine applies the
-optimization tasks, runs the installers in dependency order (runtimes before
-apps), cleans up, and returns a `DeploymentSummary` that the view-model renders on
-the final screen.
-
-Everything is decoupled through interfaces and a single `DeploymentContext`, so
-installers and optimization tasks are independently testable and the module
-boundaries stay clean.
-
----
-
-## Notes & caveats
-
-- **Roblox** and **Roblox Account Manager** install into the current (elevated)
-  user's profile — expected for a dedicated single-user box.
-- **HKCU** optimizations apply to the elevated user's hive; on a single-user Tiny10
-  machine this is the intended account.
-- Some services (Xbox, Search) may already be removed on Tiny10 — those steps
-  report **SKIPPED**, not failed.
-- Evergreen download URLs (VC++ `aka.ms`, WebView2, Edge) intentionally omit
-  `sha256`. Pin a version + hash if you need reproducible, verified installs.
-
----
-
-## License / attribution
-
-Third-party software is downloaded from official vendor sources at runtime and is
-subject to its own licenses (WinRAR, Microsoft redistributables, Mem Reduct,
-Roblox, Roblox Account Manager).
+`src/Setup/` contains an alternative implementation of the same deployment as a
+.NET 8 WPF app (`Setup.exe`) with a windowed terminal-style UI. It's fully built
+and tested, but the **PowerShell one-liner above is the recommended way to run
+the deployment** on Tiny10. Build it with `dotnet build RobloxDeploy.sln -c Release`
+if you want the GUI edition.
