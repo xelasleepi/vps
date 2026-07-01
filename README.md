@@ -130,6 +130,16 @@ driver API, so those stay on Windows Update + a link to the vendor page.
   silent installer that hangs is killed and verified, never freezing the run.
 - **Plays nice with Loafy** — the optimizer deliberately leaves Windows Power
   Throttling **on** so Loafy's EcoQoS can still park idle Roblox instances.
+- **Health check** — a final pass verifies the real end-state (Loafy process
+  running, `VPS-Opti`/`Loafy` tasks registered, Roblox/WinRAR present, key tweaks
+  actually stuck) and reports `Health: X/Y checks passed` — so you know it *worked*,
+  not just that it *ran*.
+- **Persistent report** — the full summary + every result is written to
+  `C:\ProgramData\RobloxDeploy\report.txt` (and copied to the Desktop), so nothing
+  is lost when the window closes.
+- **External config** — drop a `C:\ProgramData\RobloxDeploy\config.json` to override
+  any toggle without editing the hosted script, e.g.
+  `{ "AutoReboot": true, "Features": { "UpdateNvidiaDriver": false } }`.
 
 ## Configuration
 

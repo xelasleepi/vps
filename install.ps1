@@ -1076,6 +1076,63 @@ function Install-RAM {
 # ============================================================================
 #  10. Summary
 # ============================================================================
+# Optional external config: C:\ProgramData\RobloxDeploy\config.json is merged over
+# the embedded $Config defaults, so the hosted one-liner is configurable without
+# forking. Drop the file before running (it also persists between runs).
+function Import-ConfigOverride {
+    $path = Join-Path $Root 'config.json'
+    if (-not (Test-Path $path)) { return }
+    try {
+        $ov = Get-Content $path -Raw -ErrorAction Stop | ConvertFrom-Json
+        foreach ($p in $ov.PSObject.Properties) {
+            switch ($p.Name) {
+                'Features'  { foreach ($f in $p.Value.PSObject.Properties) { if ($Config.Features.Contains($f.Name))  { $v = $f.Value; if ($v -is [string]) { $v = ($v -eq 'true') }; $Config.Features[$f.Name] = [bool]$v } } }
+                'MemReduct' { foreach ($m in $p.Value.PSObject.Properties) { if ($Config.MemReduct.Contains($m.Name)) { $Config.MemReduct[$m.Name] = $m.Value } } }
+                default     { if ($Config.Contains($p.Name)) { $Config[$p.Name] = $p.Value } }
+            }
+        }
+        Write-Ok 'Loaded config override' "($path)"
+        Write-LogFile "[CONFIG] merged overrides from $path" 'Install'
+    } catch {
+        Write-Skip 'Config override' "(invalid JSON, using defaults — $($_.Exception.Message))"
+    }
+}
+
+function Test-SchTask([string]$name) {
+    schtasks /query /TN $name 2>$null | Out-Null
+    return ($LASTEXITCODE -eq 0)
+}
+
+# Verifies the REAL end-state (not just "installer ran"): processes, scheduled
+# tasks, files, and that key tweaks actually stuck. Informational — never fails
+# the run, but surfaces silent problems.
+function Invoke-HealthCheck {
+    Write-Section 'Health check'
+    $f = $Config.Features
+    $checks = New-Object System.Collections.ArrayList
+
+    if ($f.OptimizeWindows) {
+        [void]$checks.Add(@{ N = 'VPS-Opti logon task registered'; Ok = (Test-SchTask 'VPS-Opti') })
+        [void]$checks.Add(@{ N = 'Game DVR disabled';              Ok = (((Get-ItemProperty 'HKCU:\System\GameConfigStore' -Name GameDVR_Enabled -ErrorAction SilentlyContinue).GameDVR_Enabled) -eq 0) })
+        [void]$checks.Add(@{ N = 'Network throttling disabled';    Ok = (((Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile' -Name NetworkThrottlingIndex -ErrorAction SilentlyContinue).NetworkThrottlingIndex) -eq 0xffffffff) })
+    }
+    if ($f.InstallLoafy) {
+        [void]$checks.Add(@{ N = 'Loafy process running'; Ok = [bool](Get-Process Loafy -ErrorAction SilentlyContinue) })
+        [void]$checks.Add(@{ N = 'Loafy logon task';      Ok = (Test-SchTask 'Loafy') })
+    }
+    if ($f.InstallWinRAR) { [void]$checks.Add(@{ N = 'WinRAR installed';      Ok = (Test-Path "$env:ProgramFiles\WinRAR\WinRAR.exe") }) }
+    if ($f.InstallRoblox) { [void]$checks.Add(@{ N = 'Roblox player present'; Ok = [bool](Find-RobloxPlayer) }) }
+
+    $pass = 0
+    foreach ($c in $checks) {
+        if ($c.Ok) { Write-Ok $c.N 'ok'; $pass++ }
+        else { Write-Host ("   ✖ {0,-38}not verified" -f $c.N) -ForegroundColor Red; Write-LogFile "[HEALTH-FAIL] $($c.N)" 'Errors' }
+    }
+    $script:HealthPass  = $pass
+    $script:HealthTotal = $checks.Count
+    Write-LogFile "[HEALTH] $pass/$($checks.Count) checks passed" 'Install'
+}
+
 function Write-Summary {
     $elapsed = (Get-Date) - $script:StartTime
     $ins  = @($script:Results | Where-Object Status -eq 'Installed')
@@ -1099,6 +1156,10 @@ function Write-Summary {
     Write-Host ("   Logs      {0}" -f $Logs) -ForegroundColor DarkGray
     Write-Host ("   State     {0}" -f $StateFile) -ForegroundColor DarkGray
     Write-Host ("   Rollback  {0}  (restore point + .reg exports)" -f (Join-Path $Root 'backup')) -ForegroundColor DarkGray
+    if ($script:HealthTotal -gt 0) {
+        $hc = if ($script:HealthPass -eq $script:HealthTotal) { 'Green' } else { 'Yellow' }
+        Write-Host ("   Health    {0}/{1} checks passed" -f $script:HealthPass, $script:HealthTotal) -ForegroundColor $hc
+    }
     if ($fail.Count) {
         Write-Host ''
         Write-Host '   Failed operations (re-run to retry them):' -ForegroundColor Red
@@ -1106,6 +1167,28 @@ function Write-Summary {
     }
     Write-Host ''
     Write-LogFile "[DONE] optimized=$($opt.Count) installed=$($ins.Count) skipped=$($skp.Count) failed=$($fail.Count) elapsed=$($elapsed.ToString('hh\:mm\:ss'))"
+
+    # Persistent report that survives the window closing (written to $Root, which
+    # cleanup does not touch, plus a best-effort copy on the Desktop).
+    $rep = New-Object System.Text.StringBuilder
+    [void]$rep.AppendLine('Roblox Server Deployment — report')
+    [void]$rep.AppendLine((Get-Date).ToString('yyyy-MM-dd HH:mm:ss'))
+    [void]$rep.AppendLine('')
+    [void]$rep.AppendLine($head)
+    [void]$rep.AppendLine(('Optimized {0} | Installed {1} | Skipped {2} | Failed {3}' -f $opt.Count, $ins.Count, $skp.Count, $fail.Count))
+    if ($script:HealthTotal -gt 0) { [void]$rep.AppendLine(('Health: {0}/{1} checks passed' -f $script:HealthPass, $script:HealthTotal)) }
+    [void]$rep.AppendLine(('Elapsed: {0:hh\:mm\:ss}' -f $elapsed))
+    [void]$rep.AppendLine(('Logs:     {0}' -f $Logs))
+    [void]$rep.AppendLine(('Rollback: {0}' -f (Join-Path $Root 'backup')))
+    [void]$rep.AppendLine('')
+    [void]$rep.AppendLine('Results:')
+    foreach ($r in $script:Results) { [void]$rep.AppendLine(('  [{0,-9}] {1}  {2}' -f $r.Status, $r.Name, $r.Detail)) }
+    $reportPath = Join-Path $Root 'report.txt'
+    try { $rep.ToString() | Set-Content -Path $reportPath -Encoding UTF8 -ErrorAction SilentlyContinue } catch { }
+    foreach ($d in @([Environment]::GetFolderPath('Desktop'), "$env:PUBLIC\Desktop")) {
+        if ($d -and (Test-Path $d)) { Copy-Item $reportPath (Join-Path $d 'RobloxDeploy-report.txt') -Force -ErrorAction SilentlyContinue }
+    }
+    Write-Host ("   Report    {0}  (+ Desktop)" -f $reportPath) -ForegroundColor DarkGray
 
     if ($Config.CleanupOnFinish) {
         Remove-Item "$Dl\*", "$Tmp\*" -Recurse -Force -ErrorAction SilentlyContinue
@@ -1123,11 +1206,13 @@ try {
     Write-Banner
     Get-State                 # load checkpoint from any previous run
     Show-Resume               # tell the user what's already done
+    Import-ConfigOverride     # merge optional config.json over the defaults
     Write-LogFile "════ Roblox Server Deployment started (resuming $($script:PriorDone) prior step(s)) ════"
     New-SafetyBackup          # restore point + registry export BEFORE any changes
     Invoke-Optimizations
     Invoke-Software
     if ($Config.Features.UpdateDrivers) { Invoke-Drivers } else { Write-Info 'Driver update disabled by config.' }
+    Invoke-HealthCheck        # verify the real end-state
     Write-Summary
 }
 catch {
