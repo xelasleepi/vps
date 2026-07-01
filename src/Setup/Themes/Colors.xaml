@@ -1,0 +1,56 @@
+<ResourceDictionary
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <!--
+        Colors.xaml — the terminal color palette.
+        Defines the raw Color values and the SolidColorBrush resources the whole
+        UI binds to. Usable standalone (merge into App resources) or merged into
+        Styles.xaml. Brushes are frozen implicitly by WPF when used in a shared
+        dictionary; keys match the names the integrator and view-models expect.
+    -->
+
+    <!-- ===== Surfaces ===== -->
+    <Color x:Key="BgColor">#FF0D1117</Color>
+    <Color x:Key="PanelColor">#FF161B22</Color>
+    <Color x:Key="ElevatedColor">#FF1C2128</Color>
+    <Color x:Key="BorderColor">#FF30363D</Color>
+
+    <!-- ===== Text ===== -->
+    <Color x:Key="TextColor">#FFE6EDF3</Color>
+    <Color x:Key="MutedColor">#FF8B949E</Color>
+
+    <!-- ===== Semantic ===== -->
+    <Color x:Key="SuccessColor">#FF3FB950</Color>
+    <Color x:Key="WarningColor">#FFD29922</Color>
+    <Color x:Key="InfoColor">#FF58A6FF</Color>
+    <Color x:Key="ErrorColor">#FFF85149</Color>
+    <Color x:Key="DownloadColor">#FF39C5CF</Color>
+    <Color x:Key="AccentColor">#FF58A6FF</Color>
+
+    <!-- ===== Brushes (bound throughout the UI) ===== -->
+    <SolidColorBrush x:Key="BgBrush" Color="{StaticResource BgColor}" />
+    <SolidColorBrush x:Key="PanelBrush" Color="{StaticResource PanelColor}" />
+    <SolidColorBrush x:Key="ElevatedBrush" Color="{StaticResource ElevatedColor}" />
+    <SolidColorBrush x:Key="BorderBrush" Color="{StaticResource BorderColor}" />
+
+    <SolidColorBrush x:Key="TextBrush" Color="{StaticResource TextColor}" />
+    <SolidColorBrush x:Key="MutedBrush" Color="{StaticResource MutedColor}" />
+
+    <SolidColorBrush x:Key="SuccessBrush" Color="{StaticResource SuccessColor}" />
+    <SolidColorBrush x:Key="WarningBrush" Color="{StaticResource WarningColor}" />
+    <SolidColorBrush x:Key="InfoBrush" Color="{StaticResource InfoColor}" />
+    <SolidColorBrush x:Key="ErrorBrush" Color="{StaticResource ErrorColor}" />
+    <SolidColorBrush x:Key="DownloadBrush" Color="{StaticResource DownloadColor}" />
+    <SolidColorBrush x:Key="AccentBrush" Color="{StaticResource AccentColor}" />
+
+    <!-- ===== Gradient for the progress bar (cyan -> blue) ===== -->
+    <LinearGradientBrush x:Key="AccentGradientBrush" StartPoint="0,0" EndPoint="1,0">
+        <GradientStop Color="{StaticResource DownloadColor}" Offset="0" />
+        <GradientStop Color="{StaticResource InfoColor}" Offset="1" />
+    </LinearGradientBrush>
+
+    <!-- Subtle translucent scrim used behind the summary overlay. -->
+    <SolidColorBrush x:Key="ScrimBrush" Color="#E60D1117" />
+
+</ResourceDictionary>

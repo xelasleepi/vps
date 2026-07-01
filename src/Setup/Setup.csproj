@@ -1,0 +1,71 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Setup.exe — Roblox Server Deployment Tool
+    A single self-contained WPF (.NET 8) executable that performs a full
+    unattended Windows provisioning run: optimization, silent software
+    installs, logging and reporting.
+  -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+
+    <!-- Produce Setup.exe regardless of the project/folder name. -->
+    <AssemblyName>Setup</AssemblyName>
+    <RootNamespace>Setup</RootNamespace>
+
+    <!-- Ship as x64 (Tiny10 x64 target). -->
+    <Platforms>AnyCPU;x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>false</SelfContained>
+
+    <!-- Require administrator elevation via the embedded manifest. -->
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+
+    <!-- Product metadata. -->
+    <Product>Roblox Server Deployment</Product>
+    <Company>Deployment Tools</Company>
+    <AssemblyTitle>Setup</AssemblyTitle>
+    <Version>1.0.0</Version>
+    <FileVersion>1.0.0.0</FileVersion>
+    <AssemblyVersion>1.0.0.0</AssemblyVersion>
+    <Copyright>Copyright © 2026</Copyright>
+
+    <!-- Quality / build hygiene. -->
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <!-- CS0105: duplicate using — GlobalUsings.cs intentionally re-declares the
+         implicit-usings set so the WPF markup temp project also sees them. -->
+    <NoWarn>$(NoWarn);CS0105</NoWarn>
+    <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
+    <ApplicationIcon>Assets\setup.ico</ApplicationIcon>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- JSON configuration shipped alongside the executable. -->
+    <None Update="config.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+  <!-- Icon is optional; do not fail the build if the asset is missing. -->
+  <Target Name="RemoveMissingIcon" BeforeTargets="BeforeBuild">
+    <PropertyGroup Condition="!Exists('Assets\setup.ico')">
+      <ApplicationIcon></ApplicationIcon>
+    </PropertyGroup>
+  </Target>
+
+  <!--
+    No external NuGet packages are required: System.Text.Json ships in the
+    net8.0 shared framework and Microsoft.Win32.Registry ships in the
+    net8.0-windows (Windows Desktop) targeting pack. This keeps the build
+    fully offline-capable.
+  -->
+
+</Project>

@@ -1,0 +1,19 @@
+# Build output
+[Bb]in/
+[Oo]bj/
+[Dd]ebug/
+[Rr]elease/
+*.user
+*.suo
+.vs/
+
+# Publish output
+publish/
+*.zip
+
+# Runtime working directory produced by Setup.exe
+SetupDeploy/
+
+# Rider / VS Code
+.idea/
+.vscode/

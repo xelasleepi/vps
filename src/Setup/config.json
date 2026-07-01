@@ -1,0 +1,126 @@
+{
+  "//": "Setup.exe deployment configuration. Edit URLs, silent switches and toggles here — no recompile required. Leave 'sha256' empty to skip hash verification for evergreen (always-latest) download links whose content changes over time.",
+
+  "autoReboot": false,
+  "cleanupOnFinish": true,
+  "continueOnError": true,
+  "workingDirectory": "",
+
+  "features": {
+    "installWinRAR": true,
+    "installVisualCpp": true,
+    "installDotNet": true,
+    "installWebView2": true,
+    "installDirectX": true,
+    "installMemReduct": true,
+    "installRoblox": true,
+    "installRobloxAccountManager": true,
+    "optimizeWindows": true,
+    "autoReboot": false
+  },
+
+  "downloads": {
+    "maxRetries": 3,
+    "timeoutSeconds": 900,
+    "resumeIfPossible": true,
+    "userAgent": "SetupDeployer/1.0 (+https://localhost)"
+  },
+
+  "software": {
+    "winRar": {
+      "name": "WinRAR",
+      "url": "https://www.rarlab.com/rar/winrar-x64-711.exe",
+      "wingetId": "RARLab.WinRAR",
+      "sha256": "",
+      "installerFileName": "winrar-x64.exe",
+      "silentArgs": "/S"
+    },
+
+    "visualCppRedistributables": [
+      { "name": "Visual C++ 2015-2022 x64", "url": "https://aka.ms/vs/17/release/vc_redist.x64.exe", "sha256": "", "installerFileName": "vc_redist.2022.x64.exe", "silentArgs": "/install /quiet /norestart" },
+      { "name": "Visual C++ 2015-2022 x86", "url": "https://aka.ms/vs/17/release/vc_redist.x86.exe", "sha256": "", "installerFileName": "vc_redist.2022.x86.exe", "silentArgs": "/install /quiet /norestart" },
+      { "name": "Visual C++ 2013 x64", "url": "https://aka.ms/highdpimfc2013x64enu", "sha256": "", "installerFileName": "vcredist.2013.x64.exe", "silentArgs": "/install /quiet /norestart" },
+      { "name": "Visual C++ 2013 x86", "url": "https://aka.ms/highdpimfc2013x86enu", "sha256": "", "installerFileName": "vcredist.2013.x86.exe", "silentArgs": "/install /quiet /norestart" },
+      { "name": "Visual C++ 2012 x64", "url": "https://download.microsoft.com/download/1/6/B/16B06F60-3B20-4FF2-B699-5E9B7962F9AE/VSU_4/vcredist_x64.exe", "sha256": "", "installerFileName": "vcredist.2012.x64.exe", "silentArgs": "/install /quiet /norestart" },
+      { "name": "Visual C++ 2012 x86", "url": "https://download.microsoft.com/download/1/6/B/16B06F60-3B20-4FF2-B699-5E9B7962F9AE/VSU_4/vcredist_x86.exe", "sha256": "", "installerFileName": "vcredist.2012.x86.exe", "silentArgs": "/install /quiet /norestart" },
+      { "name": "Visual C++ 2010 x64", "url": "https://download.microsoft.com/download/A/8/0/A80747C3-41BD-45DF-B505-E9710D2744E0/vcredist_x64.exe", "sha256": "", "installerFileName": "vcredist.2010.x64.exe", "silentArgs": "/q /norestart" },
+      { "name": "Visual C++ 2010 x86", "url": "https://download.microsoft.com/download/C/6/D/C6D0FD4E-9E53-4897-9B91-836EBA2AACD3/vcredist_x86.exe", "sha256": "", "installerFileName": "vcredist.2010.x86.exe", "silentArgs": "/q /norestart" },
+      { "name": "Visual C++ 2008 x64", "url": "https://download.microsoft.com/download/5/D/8/5D8C65CB-C849-4025-8E95-C3966CAFD8AE/vcredist_x64.exe", "sha256": "", "installerFileName": "vcredist.2008.x64.exe", "silentArgs": "/q" },
+      { "name": "Visual C++ 2008 x86", "url": "https://download.microsoft.com/download/9/7/7/977B481A-7BA6-4E30-AC40-ED51EB2028F2/vcredist_x86.exe", "sha256": "", "installerFileName": "vcredist.2008.x86.exe", "silentArgs": "/q" },
+      { "name": "Visual C++ 2005 x64", "url": "https://download.microsoft.com/download/8/B/4/8B42259F-5D70-43F4-AC2E-4B208FD8D66A/vcredist_x64.EXE", "sha256": "", "installerFileName": "vcredist.2005.x64.exe", "silentArgs": "/q" },
+      { "name": "Visual C++ 2005 x86", "url": "https://download.microsoft.com/download/8/B/4/8B42259F-5D70-43F4-AC2E-4B208FD8D66A/vcredist_x86.EXE", "sha256": "", "installerFileName": "vcredist.2005.x86.exe", "silentArgs": "/q" }
+    ],
+
+    "dotNetFramework48": {
+      "name": ".NET Framework 4.8",
+      "url": "https://go.microsoft.com/fwlink/?linkid=2088631",
+      "wingetId": "Microsoft.DotNet.Framework.DeveloperPack_4",
+      "sha256": "",
+      "installerFileName": "ndp48-web.exe",
+      "silentArgs": "/q /norestart"
+    },
+
+    "dotNetDesktopRuntime": {
+      "name": ".NET Desktop Runtime 8 (x64)",
+      "url": "https://builds.dotnet.microsoft.com/dotnet/WindowsDesktop/8.0.11/windowsdesktop-runtime-8.0.11-win-x64.exe",
+      "wingetId": "Microsoft.DotNet.DesktopRuntime.8",
+      "sha256": "",
+      "installerFileName": "windowsdesktop-runtime-8-x64.exe",
+      "silentArgs": "/install /quiet /norestart"
+    },
+
+    "webView2": {
+      "name": "Microsoft Edge WebView2 Runtime",
+      "url": "https://go.microsoft.com/fwlink/p/?LinkId=2124703",
+      "wingetId": "Microsoft.EdgeWebView2Runtime",
+      "sha256": "",
+      "installerFileName": "MicrosoftEdgeWebView2Setup.exe",
+      "silentArgs": "/silent /install"
+    },
+
+    "directX": {
+      "name": "DirectX End-User Runtime (June 2010)",
+      "url": "https://download.microsoft.com/download/8/4/A/84A35BF1-DAFE-4AE8-82AF-AD2AE20B6B14/directx_Jun2010_redist.exe",
+      "wingetId": "",
+      "sha256": "",
+      "installerFileName": "directx_Jun2010_redist.exe",
+      "silentArgs": "/Q"
+    },
+
+    "memReduct": {
+      "name": "Mem Reduct",
+      "url": "https://github.com/henrypp/memreduct/releases/download/v3.4/memreduct-3.4-setup.exe",
+      "wingetId": "Henry++.MemReduct",
+      "sha256": "",
+      "installerFileName": "memreduct-setup.exe",
+      "silentArgs": "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /NOICONS"
+    },
+
+    "roblox": {
+      "name": "Roblox",
+      "url": "https://www.roblox.com/download/client?os=win",
+      "wingetId": "Roblox.Roblox",
+      "sha256": "",
+      "installerFileName": "RobloxPlayerInstaller.exe",
+      "silentArgs": ""
+    },
+
+    "robloxAccountManager": {
+      "name": "Roblox Account Manager",
+      "url": "https://github.com/ic3w0lf22/Roblox-Account-Manager/releases/latest/download/RobloxAccountManager.zip",
+      "wingetId": "",
+      "sha256": "",
+      "installerFileName": "RobloxAccountManager.zip",
+      "silentArgs": ""
+    }
+  },
+
+  "memReductSettings": {
+    "autostart": true,
+    "startMinimized": true,
+    "minimizeToTray": true,
+    "autoCleanEnabled": true,
+    "cleanThresholdPercent": 85,
+    "cleanIntervalMinutes": 30
+  }
+}
